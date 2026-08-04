@@ -32,8 +32,36 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 
 ## Build & run
 
+**1. Install Xcode Command Line Tools** (if not already installed):
+
 ```bash
-cd ocbar
+xcode-select --install
+```
+
+**2. Clone and build:**
+
+```bash
+git clone https://github.com/CurtisNewbie/ocbar.git
+cd ocbar/ocbar
 ./build.sh
+```
+
+This compiles the Swift sources and produces `ocbar.app` in the same directory.
+
+**3. Run:**
+
+```bash
 open ocbar.app
 ```
+
+The app runs as a menubar-only app (no Dock icon). You'll see the status indicator appear in your menubar immediately.
+
+**4. Allow notifications** when macOS prompts — required for idle alerts.
+
+**To rebuild after code changes:**
+
+```bash
+./build.sh && open ocbar.app
+```
+
+> Note: If macOS blocks the app ("unidentified developer"), go to **System Settings → Privacy & Security** and click **Open Anyway**.
