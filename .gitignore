@@ -30,3 +30,10 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# ocbar build artifacts
+ocbar/ocbar_bin
+ocbar/ocbar.app
+ocbar/*.xcodeproj/xcuserdata/
+ocbar/*.xcodeproj/project.xcworkspace/
+.DS_Store

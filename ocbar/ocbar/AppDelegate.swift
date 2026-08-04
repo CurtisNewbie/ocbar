@@ -1,0 +1,92 @@
+import AppKit
+import UserNotifications
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private var monitor: SessionMonitor!
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+
+        monitor = SessionMonitor { [weak self] state in
+            self?.render(state)
+        }
+
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        monitor.start()
+        render(AppState())
+    }
+
+    private func render(_ state: AppState) {
+        guard let button = statusItem.button else { return }
+
+        let busyCount = state.sessions.filter { $0.status == .busy }.count
+        let idleCount = state.sessions.filter { $0.status == .idle }.count
+        let errorCount = state.sessions.filter { $0.status == .error }.count
+
+        let color: NSColor
+        let label: String
+
+        if state.sessions.isEmpty {
+            color = .secondaryLabelColor
+            label = "oc"
+        } else if errorCount > 0 {
+            color = .systemRed
+            label = "\(errorCount) error"
+        } else if idleCount > 0 && busyCount > 0 {
+            color = .systemGreen
+            label = "\(busyCount) busy · \(idleCount) idle"
+        } else if idleCount > 0 {
+            color = .systemGreen
+            label = "\(idleCount) idle"
+        } else {
+            color = .systemOrange
+            label = "\(busyCount) busy"
+        }
+
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        if let base = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil) {
+            button.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: color)
+        }
+        button.imagePosition = .imageLeft
+        let attrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.labelColor,
+            .font: NSFont.menuBarFont(ofSize: 13)
+        ]
+        button.attributedTitle = NSAttributedString(string: " \(label)", attributes: attrs)
+
+        let menu = NSMenu()
+        if state.sessions.isEmpty {
+            menu.addItem(menuLabel("No OpenCode sessions"))
+        } else {
+            for s in state.sessions {
+                let raw = URL(fileURLWithPath: s.projectDir).lastPathComponent
+                let name = (s.projectDir.isEmpty || s.projectDir == "/") ? "port \(s.port)" : raw
+                menu.addItem(menuLabel("\(name) — \(s.status.rawValue)"))
+            }
+        }
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        statusItem.menu = menu
+    }
+
+    private func menuLabel(_ text: String) -> NSMenuItem {
+        let item = NSMenuItem()
+        item.attributedTitle = NSAttributedString(string: text, attributes: [
+            .foregroundColor: NSColor.labelColor,
+            .font: NSFont.menuFont(ofSize: 13)
+        ])
+        return item
+    }
+
+    private func tint(_ image: NSImage, color: NSColor) -> NSImage {
+        NSImage(size: image.size, flipped: false) { rect in
+            image.draw(in: rect)
+            NSGraphicsContext.current?.compositingOperation = .sourceAtop
+            color.setFill()
+            NSBezierPath(rect: rect).fill()
+            return true
+        }
+    }
+}
