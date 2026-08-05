@@ -16,7 +16,7 @@ class SessionMonitor {
 
     func start() {
         Task { await scan() }
-        scanTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        scanTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { await self.scan() }
         }

@@ -20,7 +20,7 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 
 ## How it works
 
-- Every 10s: scans `ps aux` for `opencode --port <N>` processes
+- Every 2s: scans `ps aux` for `opencode --port <N>` processes
 - Every 200ms: polls `GET /session/status` on each discovered port
 - No workflow change needed — works with your normal `opencode` terminal sessions
 
