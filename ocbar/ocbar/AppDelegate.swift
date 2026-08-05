@@ -4,10 +4,15 @@ import UserNotifications
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var monitor: SessionMonitor!
+    private var menu: NSMenu!
+    private var lastSessions: [SessionInfo] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        menu = NSMenu()
+        menu.autoenablesItems = false
+        statusItem.menu = menu
 
         monitor = SessionMonitor { [weak self] state in
             self?.render(state)
@@ -56,11 +61,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ]
         button.attributedTitle = NSAttributedString(string: " \(label)", attributes: attrs)
 
-        let menu = NSMenu()
-        if state.sessions.isEmpty {
+        let sessions = state.sessions
+        guard sessions != lastSessions else { return }
+        lastSessions = sessions
+
+        menu.removeAllItems()
+        if sessions.isEmpty {
             menu.addItem(menuLabel("No OpenCode sessions"))
         } else {
-            for s in state.sessions {
+            for s in sessions {
                 let raw = URL(fileURLWithPath: s.projectDir).lastPathComponent
                 let name = (s.projectDir.isEmpty || s.projectDir == "/") ? "port \(s.port)" : raw
                 menu.addItem(menuLabel("\(name) — \(s.status.rawValue)"))
@@ -68,15 +77,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        statusItem.menu = menu
     }
 
     private func menuLabel(_ text: String) -> NSMenuItem {
-        let item = NSMenuItem()
-        item.attributedTitle = NSAttributedString(string: text, attributes: [
-            .foregroundColor: NSColor.labelColor,
-            .font: NSFont.menuFont(ofSize: 13)
-        ])
+        let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.isEnabled = true
         return item
     }
 

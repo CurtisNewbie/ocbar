@@ -4,7 +4,7 @@ enum SessionStatus: String {
     case idle, busy, error
 }
 
-struct SessionInfo {
+struct SessionInfo: Equatable {
     let id: String
     var status: SessionStatus
     let port: Int
