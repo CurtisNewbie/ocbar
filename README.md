@@ -57,6 +57,14 @@ open ocbar.app
 
 The app runs as a menubar-only app (no Dock icon). You'll see the status indicator appear in your menubar immediately.
 
+**To find it with Spotlight (⌘+Space), copy it to your Applications folder:**
+
+```bash
+cp -R ocbar.app /Applications/
+```
+
+(Or `~/Applications/` for a per-user install.) Note: rebuilding with `./build.sh` overwrites only the project copy — recopy to `/Applications` after each rebuild. If Spotlight doesn't show it right away, run `mdimport /Applications/ocbar.app`.
+
 **4. Allow notifications** when macOS prompts — required for idle alerts.
 
 **To rebuild after code changes:**
