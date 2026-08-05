@@ -20,9 +20,10 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 
 ## How it works
 
-- Every 2s: scans `ps aux` for `opencode --port <N>` processes
+- Every 1s: scans `ps aux` for `opencode` processes; port from `--port` flag, else discovered via `lsof` listening sockets
 - Every 200ms: polls `GET /session/status` on each discovered port
-- No workflow change needed — works with your normal `opencode` terminal sessions
+
+> **Limitation:** sessions must be started with `--port` — bare `opencode` starts no HTTP server, so it cannot be monitored. `opencode --port 0` works (auto-selects a port).
 
 ## Requirements
 

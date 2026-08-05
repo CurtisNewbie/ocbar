@@ -5,7 +5,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var monitor: SessionMonitor!
     private var menu: NSMenu!
-    private var lastSessions: [SessionInfo] = []
+    private var lastSessions: [SessionInfo]? = nil
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
