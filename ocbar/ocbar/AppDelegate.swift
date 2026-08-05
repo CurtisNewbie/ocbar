@@ -72,7 +72,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             for s in sessions {
                 let raw = URL(fileURLWithPath: s.projectDir).lastPathComponent
                 let name = (s.projectDir.isEmpty || s.projectDir == "/") ? "port \(s.port)" : raw
-                menu.addItem(menuLabel("\(name) — \(s.status.rawValue)"))
+                menu.addItem(sessionItem(name: name, status: s.status))
             }
         }
         menu.addItem(.separator())
@@ -81,6 +81,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func menuLabel(_ text: String) -> NSMenuItem {
         let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+        item.isEnabled = true
+        return item
+    }
+
+    private func sessionItem(name: String, status: SessionStatus) -> NSMenuItem {
+        let symbol: String
+        let color: NSColor
+        switch status {
+        case .busy:
+            symbol = "circle.fill"
+            color = .systemOrange
+        case .idle:
+            symbol = "checkmark.circle.fill"
+            color = .systemGreen
+        case .error:
+            symbol = "exclamationmark.triangle.fill"
+            color = .systemRed
+        }
+        let item = NSMenuItem(title: "\(name) — \(status.rawValue)", action: nil, keyEquivalent: "")
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        if let base = NSImage(systemSymbolName: symbol, accessibilityDescription: status.rawValue) {
+            item.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: color)
+        }
         item.isEnabled = true
         return item
     }
