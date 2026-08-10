@@ -6,6 +6,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitor: SessionMonitor!
     private var menu: NSMenu!
     private var lastSessions: [SessionInfo]? = nil
+    private var currentState = AppState()
+    private let projectsShownKey = "ocbar.projectsShown"
+    private let defaultProjectsShown = 4
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -23,8 +26,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         render(AppState())
     }
 
-    private func render(_ state: AppState) {
+    private func render(_ state: AppState, forceMenuRefresh: Bool = false) {
         guard let button = statusItem.button else { return }
+        currentState = state
 
         let busyCount = state.sessions.filter { $0.status == .busy }.count
         let idleCount = state.sessions.filter { $0.status == .idle }.count
@@ -59,7 +63,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .foregroundColor: NSColor.labelColor,
             .font: NSFont.menuBarFont(ofSize: 13)
         ]
-        if (1...3).contains(state.sessions.count) {
+        if (1...projectsShown).contains(state.sessions.count) {
             button.image = nil
             button.attributedTitle = sessionTitle(for: state.sessions, attributes: attrs)
         } else {
@@ -73,7 +77,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let sessions = state.sessions
-        guard sessions != lastSessions else { return }
+        guard forceMenuRefresh || sessions != lastSessions else { return }
         lastSessions = sessions
 
         menu.removeAllItems()
@@ -85,7 +89,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         menu.addItem(.separator())
+        menu.addItem(projectsShownMenu())
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    private var projectsShown: Int {
+        guard let stored = UserDefaults.standard.object(forKey: projectsShownKey) as? Int,
+              (1...10).contains(stored) else {
+            return defaultProjectsShown
+        }
+        return stored
+    }
+
+    private func projectsShownMenu() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for count in 1...10 {
+            let item = NSMenuItem(title: "\(count)", action: #selector(projectsShownSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = count
+            item.state = count == projectsShown ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Projects shown", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    @objc private func projectsShownSelected(_ sender: NSMenuItem) {
+        guard (1...10).contains(sender.tag) else { return }
+        UserDefaults.standard.set(sender.tag, forKey: projectsShownKey)
+        render(currentState, forceMenuRefresh: true)
     }
 
     private func menuLabel(_ text: String) -> NSMenuItem {
