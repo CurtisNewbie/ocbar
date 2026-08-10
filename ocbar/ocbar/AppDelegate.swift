@@ -59,7 +59,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .foregroundColor: NSColor.labelColor,
             .font: NSFont.menuBarFont(ofSize: 13)
         ]
-        button.attributedTitle = NSAttributedString(string: " \(label)", attributes: attrs)
+        if (1...3).contains(state.sessions.count) {
+            button.image = nil
+            button.attributedTitle = sessionTitle(for: state.sessions, attributes: attrs)
+        } else {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+            button.image = nil
+            if let base = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil) {
+                button.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: color)
+            }
+            button.imagePosition = .imageLeft
+            button.attributedTitle = NSAttributedString(string: " \(label)", attributes: attrs)
+        }
 
         let sessions = state.sessions
         guard sessions != lastSessions else { return }
@@ -70,9 +81,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(menuLabel("No OpenCode sessions"))
         } else {
             for s in sessions {
-                let raw = URL(fileURLWithPath: s.projectDir).lastPathComponent
-                let name = (s.projectDir.isEmpty || s.projectDir == "/") ? "port \(s.port)" : raw
-                menu.addItem(sessionItem(name: name, status: s.status))
+                menu.addItem(sessionItem(name: sessionName(for: s), status: s.status))
             }
         }
         menu.addItem(.separator())
@@ -85,24 +94,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    private func sessionItem(name: String, status: SessionStatus) -> NSMenuItem {
-        let symbol: String
-        let color: NSColor
+    private func sessionTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        let title = NSMutableAttributedString()
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+
+        for (index, session) in sessions.enumerated() {
+            if index > 0 {
+                title.append(NSAttributedString(string: "  ·  ", attributes: attributes))
+            }
+
+            let appearance = statusAppearance(for: session.status)
+            if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: session.status.rawValue) {
+                let attachment = NSTextAttachment()
+                attachment.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
+                title.append(NSAttributedString(attachment: attachment))
+            }
+            title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
+        }
+
+        return title
+    }
+
+    private func sessionName(for session: SessionInfo) -> String {
+        let raw = URL(fileURLWithPath: session.projectDir).lastPathComponent
+        return (session.projectDir.isEmpty || session.projectDir == "/") ? "port \(session.port)" : raw
+    }
+
+    private func statusAppearance(for status: SessionStatus) -> (symbol: String, color: NSColor) {
         switch status {
         case .busy:
-            symbol = "circle.fill"
-            color = .systemOrange
+            return ("circle.fill", .systemOrange)
         case .idle:
-            symbol = "checkmark.circle.fill"
-            color = .systemGreen
+            return ("checkmark.circle.fill", .systemGreen)
         case .error:
-            symbol = "exclamationmark.triangle.fill"
-            color = .systemRed
+            return ("exclamationmark.triangle.fill", .systemRed)
         }
+    }
+
+    private func sessionItem(name: String, status: SessionStatus) -> NSMenuItem {
+        let appearance = statusAppearance(for: status)
         let item = NSMenuItem(title: "\(name) — \(status.rawValue)", action: nil, keyEquivalent: "")
         let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        if let base = NSImage(systemSymbolName: symbol, accessibilityDescription: status.rawValue) {
-            item.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: color)
+        if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: status.rawValue) {
+            item.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
         }
         item.isEnabled = true
         return item
