@@ -35,7 +35,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if state.sessions.isEmpty {
             color = .secondaryLabelColor
-            label = "oc"
+            label = "No Opencode Session"
         } else if errorCount > 0 {
             color = .systemRed
             label = "\(errorCount) error"
