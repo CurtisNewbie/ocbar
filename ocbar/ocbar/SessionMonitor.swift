@@ -59,9 +59,13 @@ class SessionMonitor {
         var sessions: [SessionInfo] = []
         for (port, info) in knownServers {
             let busySessions = await sessionStatus(port: port)
-            let status: SessionStatus = busySessions.isEmpty ? .idle : .busy
+            let pendingQuestions = await pendingQuestions(port: port)
+            let status: SessionStatus = pendingQuestions > 0 ? .waiting : (busySessions.isEmpty ? .idle : .busy)
 
             let prev = previousServerStatus[port]
+            if prev != .waiting && status == .waiting {
+                sendWaitingNotification(projectDir: info.dir)
+            }
             if prev == .busy && status == .idle {
                 sendIdleNotification(projectDir: info.dir)
             }
@@ -95,11 +99,29 @@ class SessionMonitor {
         return raw.compactMapValues { SessionStatus(rawValue: $0["type"] ?? "") }
     }
 
+    private func pendingQuestions(port: Int) async -> Int {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/question"),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return 0 }
+        return raw.count
+    }
+
     private func sendIdleNotification(projectDir: String) {
         let name = displayName(for: projectDir)
         let content = UNMutableNotificationContent()
         content.title = "Session ready"
         content.body = "\(name) is waiting for input"
+        content.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        )
+    }
+
+    private func sendWaitingNotification(projectDir: String) {
+        let name = displayName(for: projectDir)
+        let content = UNMutableNotificationContent()
+        content.title = "Question pending"
+        content.body = "\(name) is waiting for you to answer a question"
         content.sound = .default
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)

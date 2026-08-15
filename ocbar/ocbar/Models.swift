@@ -1,7 +1,7 @@
 import Foundation
 
 enum SessionStatus: String {
-    case idle, busy, error
+    case idle, busy, waiting, error
 }
 
 struct SessionInfo: Equatable {

@@ -27,6 +27,13 @@ class OpenCodeClient {
         return raw.compactMapValues { $0["type"] }
     }
 
+    func pendingQuestionCount() async -> Int {
+        guard let url = URL(string: "\(base)/question"),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return 0 }
+        return raw.count
+    }
+
     func eventStream() -> AsyncThrowingStream<SSEEvent, Error> {
         AsyncThrowingStream { continuation in
             guard let url = URL(string: "\(base)/event") else {

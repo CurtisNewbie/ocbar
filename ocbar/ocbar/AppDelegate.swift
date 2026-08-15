@@ -32,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let busyCount = state.sessions.filter { $0.status == .busy }.count
         let idleCount = state.sessions.filter { $0.status == .idle }.count
+        let waitingCount = state.sessions.filter { $0.status == .waiting }.count
         let errorCount = state.sessions.filter { $0.status == .error }.count
 
         let color: NSColor
@@ -43,6 +44,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else if errorCount > 0 {
             color = .systemRed
             label = "\(errorCount) error"
+        } else if waitingCount > 0 {
+            color = .systemBlue
+            label = busyCount > 0 ? "\(waitingCount) waiting · \(busyCount) busy" : "\(waitingCount) waiting"
         } else if idleCount > 0 && busyCount > 0 {
             color = .systemGreen
             label = "\(busyCount) busy · \(idleCount) idle"
@@ -161,6 +165,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         switch status {
         case .busy:
             return ("circle.fill", .systemOrange)
+        case .waiting:
+            return ("questionmark.circle.fill", .systemBlue)
         case .idle:
             return ("checkmark.circle.fill", .systemGreen)
         case .error:
