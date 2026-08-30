@@ -151,8 +151,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             let appearance = statusAppearance(for: session.status)
             if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: session.status.rawValue) {
+                let img = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
                 let attachment = NSTextAttachment()
-                attachment.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
+                attachment.image = img
+                // Nudge down so glyph center aligns with text center (glyph sits ~1.84pt high otherwise)
+                attachment.bounds = NSRect(x: 0, y: -1.84, width: img.size.width, height: img.size.height)
                 title.append(NSAttributedString(attachment: attachment))
             }
             title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
