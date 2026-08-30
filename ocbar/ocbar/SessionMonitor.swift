@@ -9,6 +9,7 @@ class SessionMonitor {
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
+    var onTransition: ((SessionStatus, String) -> Void)?
 
     init(onStateChange: @escaping (AppState) -> Void) {
         self.onStateChange = onStateChange
@@ -65,9 +66,11 @@ class SessionMonitor {
             let prev = previousServerStatus[port]
             if prev != .waiting && status == .waiting {
                 sendWaitingNotification(projectDir: info.dir)
+                onTransition?(.waiting, info.dir)
             }
             if prev == .busy && status == .idle {
                 sendIdleNotification(projectDir: info.dir)
+                onTransition?(.idle, info.dir)
             }
             previousServerStatus[port] = status
 

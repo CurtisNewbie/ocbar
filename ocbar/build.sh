@@ -13,6 +13,7 @@ swiftc \
   "$DIR/ocbar/ProcessScanner.swift" \
   "$DIR/ocbar/OpenCodeClient.swift" \
   "$DIR/ocbar/SessionMonitor.swift" \
+  "$DIR/ocbar/StatusBubble.swift" \
   "$DIR/ocbar/AppDelegate.swift" \
   "$DIR/ocbar/main.swift" \
   -framework AppKit \

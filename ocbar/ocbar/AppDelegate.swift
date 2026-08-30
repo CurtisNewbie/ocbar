@@ -7,6 +7,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var menu: NSMenu!
     private var lastSessions: [SessionInfo]? = nil
     private var currentState = AppState()
+    private var bubble: StatusBubble!
     private let projectsShownKey = "ocbar.projectsShown"
     private let defaultProjectsShown = 4
 
@@ -19,6 +20,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         monitor = SessionMonitor { [weak self] state in
             self?.render(state)
+        }
+        bubble = StatusBubble()
+        monitor.onTransition = { [weak self] status, dir in
+            self?.showBubble(status: status, projectDir: dir)
         }
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -183,6 +188,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         item.isEnabled = true
         return item
+    }
+
+    private func showBubble(status: SessionStatus, projectDir: String) {
+        let name = displayName(for: projectDir)
+        let text: String
+        let color: NSColor
+        let symbol: String
+        switch status {
+        case .idle:
+            text = "\(name) ready"
+            color = .systemGreen
+            symbol = "checkmark.circle.fill"
+        case .waiting:
+            text = "\(name) needs input"
+            color = .systemBlue
+            symbol = "questionmark.circle.fill"
+        default:
+            return
+        }
+        bounceIcon()
+        bubble.show(anchor: statusItem.button, text: text, color: color, symbol: symbol)
+    }
+
+    private func bounceIcon() {
+        guard let button = statusItem.button else { return }
+        button.wantsLayer = true
+        let bounce = CAKeyframeAnimation(keyPath: "transform.scale")
+        bounce.values = [1.0, 1.5, 0.85, 1.2, 1.0]
+        bounce.keyTimes = [0, 0.25, 0.5, 0.75, 1]
+        bounce.duration = 0.6
+        bounce.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        button.layer?.add(bounce, forKey: "bubbleBounce")
+    }
+
+    private func displayName(for dir: String) -> String {
+        guard !dir.isEmpty && dir != "/" else { return "OpenCode" }
+        return URL(fileURLWithPath: dir).lastPathComponent
     }
 
     private func tint(_ image: NSImage, color: NSColor) -> NSImage {
