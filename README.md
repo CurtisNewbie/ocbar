@@ -18,6 +18,8 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 
 **Notification** fires when any session transitions from busy → idle.
 
+**Bubble** — when a session transitions busy → idle or → waiting, a speech-bubble pops up below the menubar icon with a tail pointing at it: "`project` ready" (green checkmark) or "`project` needs input" (blue question mark). It pops in, holds 5 seconds, then fades out. The menubar icon bounces at the same time to draw the eye.
+
 ## How it works
 
 - Every 1s: scans `ps aux` for `opencode` processes; port from `--port` flag, else discovered via `lsof` listening sockets
