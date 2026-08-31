@@ -1,58 +1,75 @@
 import AppKit
 
 /// Speech-bubble attached below the ocbar menubar icon when a session changes status.
+/// Shown on every connected screen, since the menubar icon itself is only
+/// visible on whichever screen currently hosts the system menu bar.
 class StatusBubble {
-    private var panel: NSPanel?
-    private var label: NSTextField?
+    private var panels: [ObjectIdentifier: NSPanel] = [:]
+    private var labels: [ObjectIdentifier: NSTextField] = [:]
     private var dismissWork: DispatchWorkItem?
 
     func show(anchor: NSView?, text: String, color: NSColor, symbol: String) {
-        guard let anchor, let anchorWindow = anchor.window else { return }
-
         dismissWork?.cancel()
 
-        let panel = panel ?? makePanel()
-        self.panel = panel
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
 
-        guard let label else { return }
-        label.attributedStringValue = attributedTitle(text: text, color: color, symbol: symbol)
+        let anchorScreen = anchor?.window?.screen
+        let anchorFrame: NSRect? = {
+            guard let anchor, let anchorWindow = anchor.window else { return nil }
+            return anchorWindow.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+        }()
 
-        // Position below the status item, centered on it, clamped to screen edges.
-        let panelSize = panel.frame.size
-        let anchorFrame = anchorWindow.convertToScreen(anchor.convert(anchor.bounds, to: nil))
-        var x = anchorFrame.midX - panelSize.width / 2
-        let y = anchorFrame.minY - panelSize.height - 4
-        if let screen = anchorWindow.screen ?? NSScreen.main {
+        for screen in screens {
+            let key = ObjectIdentifier(screen)
+            let panel = panels[key] ?? makePanel(for: screen)
+            guard let label = labels[key] else { continue }
+            label.attributedStringValue = attributedTitle(text: text, color: color, symbol: symbol)
+
+            // On the screen hosting the status item, anchor below the icon.
+            // On other screens (no visible icon there), center at the top.
+            let panelSize = panel.frame.size
+            var x: CGFloat
+            let y: CGFloat
+            if screen == anchorScreen, let anchorFrame {
+                x = anchorFrame.midX - panelSize.width / 2
+                y = anchorFrame.minY - panelSize.height - 4
+            } else {
+                x = screen.visibleFrame.midX - panelSize.width / 2
+                y = screen.visibleFrame.maxY - panelSize.height - 4
+            }
             x = min(max(x, screen.visibleFrame.minX + 8), screen.visibleFrame.maxX - panelSize.width - 8)
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+
+            guard let contentView = panel.contentView else { continue }
+            contentView.wantsLayer = true
+
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                panel.animator().alphaValue = 1
+            }
+
+            let pop = CAKeyframeAnimation(keyPath: "transform.scale")
+            pop.values = [0.7, 1.08, 0.96, 1.0]
+            pop.keyTimes = [0, 0.6, 0.8, 1]
+            pop.duration = 0.35
+            pop.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            contentView.layer?.add(pop, forKey: "bubblePop")
         }
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
-
-        panel.alphaValue = 0
-        panel.orderFrontRegardless()
-
-        guard let contentView = panel.contentView else { return }
-        contentView.wantsLayer = true
-
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
-            panel.animator().alphaValue = 1
-        }
-
-        let pop = CAKeyframeAnimation(keyPath: "transform.scale")
-        pop.values = [0.7, 1.08, 0.96, 1.0]
-        pop.keyTimes = [0, 0.6, 0.8, 1]
-        pop.duration = 0.35
-        pop.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        contentView.layer?.add(pop, forKey: "bubblePop")
 
         let work = DispatchWorkItem { [weak self] in
-            guard let self, let panel = self.panel else { return }
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.4
-                panel.animator().alphaValue = 0
-            }, completionHandler: {
-                panel.orderOut(nil)
-            })
+            guard let self else { return }
+            for panel in self.panels.values {
+                NSAnimationContext.runAnimationGroup({ ctx in
+                    ctx.duration = 0.4
+                    panel.animator().alphaValue = 0
+                }, completionHandler: {
+                    panel.orderOut(nil)
+                })
+            }
         }
         dismissWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: work)
@@ -84,7 +101,7 @@ class StatusBubble {
         }
     }
 
-    private func makePanel() -> NSPanel {
+    private func makePanel(for screen: NSScreen) -> NSPanel {
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 280, height: 54),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -99,6 +116,9 @@ class StatusBubble {
         panel.isMovable = false
         panel.hidesOnDeactivate = false
 
+        let key = ObjectIdentifier(screen)
+        panels[key] = panel
+
         guard let contentView = panel.contentView else { return panel }
 
         let bubble = BubbleView(frame: contentView.bounds)
@@ -108,7 +128,7 @@ class StatusBubble {
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
-        self.label = label
+        labels[key] = label
 
         bubble.addSubview(label)
         NSLayoutConstraint.activate([
