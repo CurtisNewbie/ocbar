@@ -4,12 +4,28 @@ import AppKit
 /// menubar icon (the anchor screen always anchors to the icon itself).
 enum BubblePosition: String, CaseIterable {
     case topCenter
+    case topLeft
+    case topRight
+    case bottomLeft
     case bottomRight
 
     var displayName: String {
         switch self {
         case .topCenter: return "Top center"
+        case .topLeft: return "Top left"
+        case .topRight: return "Top right"
+        case .bottomLeft: return "Bottom left"
         case .bottomRight: return "Bottom right"
+        }
+    }
+
+    /// Tail direction for this placement: corner bubbles point toward the
+    /// edge they are pinned to; top-center keeps the downward tail.
+    fileprivate var tailDirection: BubbleView.TailDirection {
+        switch self {
+        case .topCenter: return .down
+        case .topLeft, .bottomLeft: return .left
+        case .topRight, .bottomRight: return .right
         }
     }
 }
@@ -42,10 +58,10 @@ class StatusBubble {
             guard let label = labels[key], let bubble = bubbles[key] else { continue }
             label.attributedStringValue = attributedTitle(text: text, color: color, symbol: symbol)
 
-            // Tail follows the bubble: points down when anchored to the icon or
-            // centered at the top; points right when pinned bottom-right.
+            // Tail follows the bubble: down when anchored to the icon or
+            // top-center; otherwise toward the corner it is pinned to.
             let isAnchorScreen = screen == anchorScreen && anchorFrame != nil
-            let desiredDirection: BubbleView.TailDirection = (isAnchorScreen || position != .bottomRight) ? .down : .right
+            let desiredDirection: BubbleView.TailDirection = isAnchorScreen ? .down : position.tailDirection
             if bubble.tailDirection != desiredDirection {
                 bubble.tailDirection = desiredDirection
                 bubble.needsDisplay = true
@@ -61,6 +77,9 @@ class StatusBubble {
                     centers.y.constant = -BubbleView.tailHeight / 2
                 case .right:
                     centers.x.constant = -BubbleView.tailHeight / 2
+                    centers.y.constant = 0
+                case .left:
+                    centers.x.constant = BubbleView.tailHeight / 2
                     centers.y.constant = 0
                 }
             }
@@ -78,6 +97,15 @@ class StatusBubble {
                 case .topCenter:
                     x = screen.visibleFrame.midX - panelSize.width / 2
                     y = screen.visibleFrame.maxY - panelSize.height - 4
+                case .topLeft:
+                    x = screen.visibleFrame.minX + 8
+                    y = screen.visibleFrame.maxY - panelSize.height - 4
+                case .topRight:
+                    x = screen.visibleFrame.maxX - panelSize.width - 8
+                    y = screen.visibleFrame.maxY - panelSize.height - 4
+                case .bottomLeft:
+                    x = screen.visibleFrame.minX + 8
+                    y = screen.visibleFrame.minY + 8
                 case .bottomRight:
                     x = screen.visibleFrame.maxX - panelSize.width - 8
                     y = screen.visibleFrame.minY + 8
@@ -188,13 +216,14 @@ class StatusBubble {
 }
 
 /// Rounded speech bubble with a tail. The tail points down (at the menubar
-/// icon) or right (when the bubble is pinned to the bottom-right corner).
+/// icon) or toward the screen edge the bubble is pinned to (left/right).
 private class BubbleView: NSView {
     static let tailHeight: CGFloat = 9
     static let tailWidth: CGFloat = 18
 
     enum TailDirection {
         case down
+        case left
         case right
     }
 
@@ -219,6 +248,13 @@ private class BubbleView: NSView {
             path.move(to: NSPoint(x: bounds.width - Self.tailHeight, y: y - Self.tailWidth / 2))
             path.line(to: NSPoint(x: bounds.width, y: y))
             path.line(to: NSPoint(x: bounds.width - Self.tailHeight, y: y + Self.tailWidth / 2))
+        case .left:
+            let body = NSRect(x: Self.tailHeight, y: 0, width: bounds.width - Self.tailHeight, height: bounds.height)
+            path.appendRoundedRect(body, xRadius: radius, yRadius: radius)
+            let y = bounds.midY
+            path.move(to: NSPoint(x: Self.tailHeight, y: y - Self.tailWidth / 2))
+            path.line(to: NSPoint(x: 0, y: y))
+            path.line(to: NSPoint(x: Self.tailHeight, y: y + Self.tailWidth / 2))
         }
         path.close()
 
