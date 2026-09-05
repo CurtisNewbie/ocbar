@@ -10,6 +10,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var bubble: StatusBubble!
     private let projectsShownKey = "ocbar.projectsShown"
     private let defaultProjectsShown = 4
+    private let bubblePositionKey = "ocbar.bubblePosition"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -99,6 +100,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(projectsShownMenu())
+        menu.addItem(bubblePositionMenu())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -131,6 +133,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func projectsShownSelected(_ sender: NSMenuItem) {
         guard (1...10).contains(sender.tag) else { return }
         UserDefaults.standard.set(sender.tag, forKey: projectsShownKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    private var bubblePosition: BubblePosition {
+        guard let raw = UserDefaults.standard.string(forKey: bubblePositionKey),
+              let position = BubblePosition(rawValue: raw) else { return .topCenter }
+        return position
+    }
+
+    private func bubblePositionMenu() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for (index, position) in BubblePosition.allCases.enumerated() {
+            let item = NSMenuItem(title: position.displayName, action: #selector(bubblePositionSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = position == bubblePosition ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Bubble position", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    @objc private func bubblePositionSelected(_ sender: NSMenuItem) {
+        let all = BubblePosition.allCases
+        guard all.indices.contains(sender.tag) else { return }
+        UserDefaults.standard.set(all[sender.tag].rawValue, forKey: bubblePositionKey)
         render(currentState, forceMenuRefresh: true)
     }
 
@@ -211,7 +243,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         bounceIcon()
-        bubble.show(anchor: statusItem.button, text: text, color: color, symbol: symbol)
+        bubble.show(anchor: statusItem.button, text: text, color: color, symbol: symbol, position: bubblePosition)
     }
 
     private func bounceIcon() {

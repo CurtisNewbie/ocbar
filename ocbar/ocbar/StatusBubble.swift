@@ -1,14 +1,30 @@
 import AppKit
 
+/// Where the bubble is placed on screens other than the one hosting the
+/// menubar icon (the anchor screen always anchors to the icon itself).
+enum BubblePosition: String, CaseIterable {
+    case topCenter
+    case bottomRight
+
+    var displayName: String {
+        switch self {
+        case .topCenter: return "Top center"
+        case .bottomRight: return "Bottom right"
+        }
+    }
+}
+
 /// Speech-bubble attached below the ocbar menubar icon when a session changes status.
 /// Shown on every connected screen, since the menubar icon itself is only
 /// visible on whichever screen currently hosts the system menu bar.
 class StatusBubble {
     private var panels: [ObjectIdentifier: NSPanel] = [:]
     private var labels: [ObjectIdentifier: NSTextField] = [:]
+    private var bubbles: [ObjectIdentifier: BubbleView] = [:]
+    private var labelCenters: [ObjectIdentifier: (x: NSLayoutConstraint, y: NSLayoutConstraint)] = [:]
     private var dismissWork: DispatchWorkItem?
 
-    func show(anchor: NSView?, text: String, color: NSColor, symbol: String) {
+    func show(anchor: NSView?, text: String, color: NSColor, symbol: String, position: BubblePosition) {
         dismissWork?.cancel()
 
         let screens = NSScreen.screens
@@ -23,20 +39,49 @@ class StatusBubble {
         for screen in screens {
             let key = ObjectIdentifier(screen)
             let panel = panels[key] ?? makePanel(for: screen)
-            guard let label = labels[key] else { continue }
+            guard let label = labels[key], let bubble = bubbles[key] else { continue }
             label.attributedStringValue = attributedTitle(text: text, color: color, symbol: symbol)
 
+            // Tail follows the bubble: points down when anchored to the icon or
+            // centered at the top; points right when pinned bottom-right.
+            let isAnchorScreen = screen == anchorScreen && anchorFrame != nil
+            let desiredDirection: BubbleView.TailDirection = (isAnchorScreen || position != .bottomRight) ? .down : .right
+            if bubble.tailDirection != desiredDirection {
+                bubble.tailDirection = desiredDirection
+                bubble.needsDisplay = true
+            }
+
+            // Keep the label centered on the bubble body (the tail eats into
+            // the view on the side it points to). The down-tail keeps its
+            // original offset, which reads optically centered.
+            if let centers = labelCenters[key] {
+                switch desiredDirection {
+                case .down:
+                    centers.x.constant = 0
+                    centers.y.constant = -BubbleView.tailHeight / 2
+                case .right:
+                    centers.x.constant = -BubbleView.tailHeight / 2
+                    centers.y.constant = 0
+                }
+            }
+
             // On the screen hosting the status item, anchor below the icon.
-            // On other screens (no visible icon there), center at the top.
+            // On other screens (no visible icon there), use the configured position.
             let panelSize = panel.frame.size
             var x: CGFloat
             let y: CGFloat
-            if screen == anchorScreen, let anchorFrame {
+            if isAnchorScreen, let anchorFrame {
                 x = anchorFrame.midX - panelSize.width / 2
                 y = anchorFrame.minY - panelSize.height - 4
             } else {
-                x = screen.visibleFrame.midX - panelSize.width / 2
-                y = screen.visibleFrame.maxY - panelSize.height - 4
+                switch position {
+                case .topCenter:
+                    x = screen.visibleFrame.midX - panelSize.width / 2
+                    y = screen.visibleFrame.maxY - panelSize.height - 4
+                case .bottomRight:
+                    x = screen.visibleFrame.maxX - panelSize.width - 8
+                    y = screen.visibleFrame.minY + 8
+                }
             }
             x = min(max(x, screen.visibleFrame.minX + 8), screen.visibleFrame.maxX - panelSize.width - 8)
             panel.setFrameOrigin(NSPoint(x: x, y: y))
@@ -123,6 +168,7 @@ class StatusBubble {
 
         let bubble = BubbleView(frame: contentView.bounds)
         bubble.autoresizingMask = [.width, .height]
+        bubbles[key] = bubble
 
         let label = NSTextField(labelWithString: "")
         label.alignment = .center
@@ -131,31 +177,49 @@ class StatusBubble {
         labels[key] = label
 
         bubble.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: bubble.centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: bubble.centerYAnchor, constant: -BubbleView.tailHeight / 2),
-            label.widthAnchor.constraint(lessThanOrEqualTo: bubble.widthAnchor, constant: -28)
-        ])
+        let centerX = label.centerXAnchor.constraint(equalTo: bubble.centerXAnchor)
+        let centerY = label.centerYAnchor.constraint(equalTo: bubble.centerYAnchor, constant: -BubbleView.tailHeight / 2)
+        let width = label.widthAnchor.constraint(lessThanOrEqualTo: bubble.widthAnchor, constant: -28)
+        NSLayoutConstraint.activate([centerX, centerY, width])
+        labelCenters[key] = (centerX, centerY)
         contentView.addSubview(bubble)
         return panel
     }
 }
 
-/// Rounded bubble with a tail pointing up at the menubar icon.
+/// Rounded speech bubble with a tail. The tail points down (at the menubar
+/// icon) or right (when the bubble is pinned to the bottom-right corner).
 private class BubbleView: NSView {
     static let tailHeight: CGFloat = 9
     static let tailWidth: CGFloat = 18
 
-    override func draw(_ dirtyRect: NSRect) {
-        let body = NSRect(x: 0, y: Self.tailHeight, width: bounds.width, height: bounds.height - Self.tailHeight)
-        let radius: CGFloat = 12
+    enum TailDirection {
+        case down
+        case right
+    }
 
+    var tailDirection: TailDirection = .down
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius: CGFloat = 12
         let path = NSBezierPath()
-        path.appendRoundedRect(body, xRadius: radius, yRadius: radius)
-        let midX = bounds.midX
-        path.move(to: NSPoint(x: midX - Self.tailWidth / 2, y: Self.tailHeight))
-        path.line(to: NSPoint(x: midX, y: 0))
-        path.line(to: NSPoint(x: midX + Self.tailWidth / 2, y: Self.tailHeight))
+
+        switch tailDirection {
+        case .down:
+            let body = NSRect(x: 0, y: Self.tailHeight, width: bounds.width, height: bounds.height - Self.tailHeight)
+            path.appendRoundedRect(body, xRadius: radius, yRadius: radius)
+            let x = bounds.midX
+            path.move(to: NSPoint(x: x - Self.tailWidth / 2, y: Self.tailHeight))
+            path.line(to: NSPoint(x: x, y: 0))
+            path.line(to: NSPoint(x: x + Self.tailWidth / 2, y: Self.tailHeight))
+        case .right:
+            let body = NSRect(x: 0, y: 0, width: bounds.width - Self.tailHeight, height: bounds.height)
+            path.appendRoundedRect(body, xRadius: radius, yRadius: radius)
+            let y = bounds.midY
+            path.move(to: NSPoint(x: bounds.width - Self.tailHeight, y: y - Self.tailWidth / 2))
+            path.line(to: NSPoint(x: bounds.width, y: y))
+            path.line(to: NSPoint(x: bounds.width - Self.tailHeight, y: y + Self.tailWidth / 2))
+        }
         path.close()
 
         NSColor.windowBackgroundColor.setFill()
