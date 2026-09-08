@@ -1,7 +1,7 @@
 import AppKit
 import UserNotifications
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var monitor: SessionMonitor!
     private var menu: NSMenu!
@@ -10,13 +10,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var bubble: StatusBubble!
     private let projectsShownKey = "ocbar.projectsShown"
     private let defaultProjectsShown = 4
-    private let bubblePositionKey = "ocbar.bubblePosition"
+    private let bubblePositionsKey = "ocbar.bubblePositions"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         menu = NSMenu()
         menu.autoenablesItems = false
+        menu.delegate = self
         statusItem.menu = menu
 
         monitor = SessionMonitor { [weak self] state in
@@ -136,20 +137,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         render(currentState, forceMenuRefresh: true)
     }
 
-    private var bubblePosition: BubblePosition {
-        guard let raw = UserDefaults.standard.string(forKey: bubblePositionKey),
-              let position = BubblePosition(rawValue: raw) else { return .topCenter }
-        return position
+    private var bubblePositions: Set<BubblePosition> {
+        guard let raw = UserDefaults.standard.array(forKey: bubblePositionsKey) as? [String] else {
+            return [.topCenter]
+        }
+        let positions = Set(raw.compactMap(BubblePosition.init(rawValue:)))
+        return positions.isEmpty ? [.topCenter] : positions
     }
 
     private func bubblePositionMenu() -> NSMenuItem {
         let submenu = NSMenu()
         submenu.autoenablesItems = false
+        let selected = bubblePositions
         for (index, position) in BubblePosition.allCases.enumerated() {
-            let item = NSMenuItem(title: position.displayName, action: #selector(bubblePositionSelected(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: position.displayName, action: #selector(bubblePositionToggled(_:)), keyEquivalent: "")
             item.target = self
             item.tag = index
-            item.state = position == bubblePosition ? .on : .off
+            item.state = selected.contains(position) ? .on : .off
             submenu.addItem(item)
         }
 
@@ -159,10 +163,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    @objc private func bubblePositionSelected(_ sender: NSMenuItem) {
+    @objc private func bubblePositionToggled(_ sender: NSMenuItem) {
         let all = BubblePosition.allCases
         guard all.indices.contains(sender.tag) else { return }
-        UserDefaults.standard.set(all[sender.tag].rawValue, forKey: bubblePositionKey)
+        let tapped = all[sender.tag]
+        var current = bubblePositions
+        if current.contains(tapped) {
+            guard current.count > 1 else { return }
+            current.remove(tapped)
+        } else {
+            current.insert(tapped)
+        }
+        UserDefaults.standard.set(current.map { $0.rawValue }, forKey: bubblePositionsKey)
         render(currentState, forceMenuRefresh: true)
     }
 
@@ -243,18 +255,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         bounceIcon()
-        bubble.show(anchor: statusItem.button, text: text, color: color, symbol: symbol, position: bubblePosition)
+        bubble.show(anchor: statusItem.button, text: text, color: color, symbol: symbol, positions: Array(bubblePositions))
     }
 
     private func bounceIcon() {
         guard let button = statusItem.button else { return }
         button.wantsLayer = true
         let bounce = CAKeyframeAnimation(keyPath: "transform.scale")
-        bounce.values = [1.0, 1.5, 0.85, 1.2, 1.0]
+        bounce.values = [1.0, 1.15, 0.95, 1.05, 1.0]
         bounce.keyTimes = [0, 0.25, 0.5, 0.75, 1]
         bounce.duration = 0.6
         bounce.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         button.layer?.add(bounce, forKey: "bubbleBounce")
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        bubble.stopPulsing()
     }
 
     private func displayName(for dir: String) -> String {

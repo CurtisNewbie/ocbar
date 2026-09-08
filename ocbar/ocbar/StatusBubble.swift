@@ -34,13 +34,18 @@ enum BubblePosition: String, CaseIterable {
 /// Shown on every connected screen, since the menubar icon itself is only
 /// visible on whichever screen currently hosts the system menu bar.
 class StatusBubble {
-    private var panels: [ObjectIdentifier: NSPanel] = [:]
-    private var labels: [ObjectIdentifier: NSTextField] = [:]
-    private var bubbles: [ObjectIdentifier: BubbleView] = [:]
-    private var labelCenters: [ObjectIdentifier: (x: NSLayoutConstraint, y: NSLayoutConstraint)] = [:]
+    private struct PanelKey: Hashable {
+        let screen: ObjectIdentifier
+        let position: BubblePosition?
+    }
+
+    private var panels: [PanelKey: NSPanel] = [:]
+    private var labels: [PanelKey: NSTextField] = [:]
+    private var bubbles: [PanelKey: BubbleView] = [:]
+    private var labelCenters: [PanelKey: (x: NSLayoutConstraint, y: NSLayoutConstraint)] = [:]
     private var dismissWork: DispatchWorkItem?
 
-    func show(anchor: NSView?, text: String, color: NSColor, symbol: String, position: BubblePosition) {
+    func show(anchor: NSView?, text: String, color: NSColor, symbol: String, positions: [BubblePosition]) {
         dismissWork?.cancel()
 
         let screens = NSScreen.screens
@@ -52,85 +57,105 @@ class StatusBubble {
             return anchorWindow.convertToScreen(anchor.convert(anchor.bounds, to: nil))
         }()
 
+        var activeKeys: Set<PanelKey> = []
+
         for screen in screens {
-            let key = ObjectIdentifier(screen)
-            let panel = panels[key] ?? makePanel(for: screen)
-            guard let label = labels[key], let bubble = bubbles[key] else { continue }
-            label.attributedStringValue = attributedTitle(text: text, color: color, symbol: symbol)
-
-            // Tail follows the bubble: down when anchored to the icon or
-            // top-center; otherwise toward the corner it is pinned to.
+            let screenId = ObjectIdentifier(screen)
             let isAnchorScreen = screen == anchorScreen && anchorFrame != nil
-            let desiredDirection: BubbleView.TailDirection = isAnchorScreen ? .down : position.tailDirection
-            if bubble.tailDirection != desiredDirection {
-                bubble.tailDirection = desiredDirection
-                bubble.needsDisplay = true
-            }
 
-            // Keep the label centered on the bubble body (the tail eats into
-            // the view on the side it points to). The down-tail keeps its
-            // original offset, which reads optically centered.
-            if let centers = labelCenters[key] {
-                switch desiredDirection {
-                case .down:
-                    centers.x.constant = 0
-                    centers.y.constant = -BubbleView.tailHeight / 2
-                case .right:
-                    centers.x.constant = -BubbleView.tailHeight / 2
-                    centers.y.constant = 0
-                case .left:
-                    centers.x.constant = BubbleView.tailHeight / 2
-                    centers.y.constant = 0
+            let keys: [PanelKey] = isAnchorScreen
+                ? [PanelKey(screen: screenId, position: nil)]
+                : positions.map { PanelKey(screen: screenId, position: $0) }
+
+            for key in keys {
+                activeKeys.insert(key)
+                let panel = panels[key] ?? makePanel(for: key)
+                guard let label = labels[key], let bubble = bubbles[key] else { continue }
+                label.attributedStringValue = attributedTitle(text: text, color: color, symbol: symbol)
+
+                let desiredDirection: BubbleView.TailDirection = key.position.map { $0.tailDirection } ?? .down
+                if bubble.tailDirection != desiredDirection {
+                    bubble.tailDirection = desiredDirection
+                    bubble.needsDisplay = true
                 }
-            }
 
-            // On the screen hosting the status item, anchor below the icon.
-            // On other screens (no visible icon there), use the configured position.
-            let panelSize = panel.frame.size
-            var x: CGFloat
-            let y: CGFloat
-            if isAnchorScreen, let anchorFrame {
-                x = anchorFrame.midX - panelSize.width / 2
-                y = anchorFrame.minY - panelSize.height - 4
-            } else {
-                switch position {
-                case .topCenter:
-                    x = screen.visibleFrame.midX - panelSize.width / 2
-                    y = screen.visibleFrame.maxY - panelSize.height - 4
-                case .topLeft:
-                    x = screen.visibleFrame.minX + 8
-                    y = screen.visibleFrame.maxY - panelSize.height - 4
-                case .topRight:
-                    x = screen.visibleFrame.maxX - panelSize.width - 8
-                    y = screen.visibleFrame.maxY - panelSize.height - 4
-                case .bottomLeft:
-                    x = screen.visibleFrame.minX + 8
-                    y = screen.visibleFrame.minY + 8
-                case .bottomRight:
-                    x = screen.visibleFrame.maxX - panelSize.width - 8
-                    y = screen.visibleFrame.minY + 8
+                if let centers = labelCenters[key] {
+                    switch desiredDirection {
+                    case .down:
+                        centers.x.constant = 0
+                        centers.y.constant = -BubbleView.tailHeight / 2
+                    case .right:
+                        centers.x.constant = -BubbleView.tailHeight / 2
+                        centers.y.constant = 0
+                    case .left:
+                        centers.x.constant = BubbleView.tailHeight / 2
+                        centers.y.constant = 0
+                    }
                 }
+
+                let panelSize = panel.frame.size
+                var x: CGFloat
+                let y: CGFloat
+                if key.position == nil, let anchorFrame {
+                    x = anchorFrame.midX - panelSize.width / 2
+                    y = anchorFrame.minY - panelSize.height - 4
+                } else {
+                    let position = key.position ?? .topCenter
+                    switch position {
+                    case .topCenter:
+                        x = screen.visibleFrame.midX - panelSize.width / 2
+                        y = screen.visibleFrame.maxY - panelSize.height - 4
+                    case .topLeft:
+                        x = screen.visibleFrame.minX + 8
+                        y = screen.visibleFrame.maxY - panelSize.height - 4
+                    case .topRight:
+                        x = screen.visibleFrame.maxX - panelSize.width - 8
+                        y = screen.visibleFrame.maxY - panelSize.height - 4
+                    case .bottomLeft:
+                        x = screen.visibleFrame.minX + 8
+                        y = screen.visibleFrame.minY + 8
+                    case .bottomRight:
+                        x = screen.visibleFrame.maxX - panelSize.width - 8
+                        y = screen.visibleFrame.minY + 8
+                    }
+                }
+                x = min(max(x, screen.visibleFrame.minX + 8), screen.visibleFrame.maxX - panelSize.width - 8)
+                panel.setFrameOrigin(NSPoint(x: x, y: y))
+
+                panel.alphaValue = 0
+                panel.orderFrontRegardless()
+
+                guard let contentView = panel.contentView else { continue }
+                contentView.wantsLayer = true
+
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.15
+                    panel.animator().alphaValue = 1
+                }
+
+                let pop = CAKeyframeAnimation(keyPath: "transform.scale")
+                pop.values = [0.7, 1.08, 0.96, 1.0]
+                pop.keyTimes = [0, 0.6, 0.8, 1]
+                pop.duration = 0.35
+                pop.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                contentView.layer?.add(pop, forKey: "bubblePop")
+
+                let bounce = CABasicAnimation(keyPath: "transform.translation.y")
+                bounce.fromValue = 0
+                bounce.toValue = 6
+                bounce.duration = 0.6
+                bounce.autoreverses = true
+                bounce.repeatCount = .infinity
+                bounce.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                bounce.beginTime = CACurrentMediaTime() + 0.35
+                contentView.layer?.add(bounce, forKey: "bubblePulse")
             }
-            x = min(max(x, screen.visibleFrame.minX + 8), screen.visibleFrame.maxX - panelSize.width - 8)
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
 
-            panel.alphaValue = 0
-            panel.orderFrontRegardless()
-
-            guard let contentView = panel.contentView else { continue }
-            contentView.wantsLayer = true
-
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.15
-                panel.animator().alphaValue = 1
-            }
-
-            let pop = CAKeyframeAnimation(keyPath: "transform.scale")
-            pop.values = [0.7, 1.08, 0.96, 1.0]
-            pop.keyTimes = [0, 0.6, 0.8, 1]
-            pop.duration = 0.35
-            pop.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            contentView.layer?.add(pop, forKey: "bubblePop")
+        // Screens/positions no longer active this call (e.g. user reduced the
+        // selected position set) — hide their stale panels immediately.
+        for (key, panel) in panels where !activeKeys.contains(key) {
+            panel.orderOut(nil)
         }
 
         let work = DispatchWorkItem { [weak self] in
@@ -146,6 +171,12 @@ class StatusBubble {
         }
         dismissWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: work)
+    }
+
+    func stopPulsing() {
+        for panel in panels.values {
+            panel.contentView?.layer?.removeAnimation(forKey: "bubblePulse")
+        }
     }
 
     private func attributedTitle(text: String, color: NSColor, symbol: String) -> NSAttributedString {
@@ -174,9 +205,13 @@ class StatusBubble {
         }
     }
 
-    private func makePanel(for screen: NSScreen) -> NSPanel {
+    private func makePanel(for key: PanelKey) -> NSPanel {
+        let baseWidth: CGFloat = 280
+        let baseHeight: CGFloat = 54
+        let horizontalMargin: CGFloat = 16
+        let verticalMargin: CGFloat = 8
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 280, height: 54),
+            contentRect: NSRect(x: 0, y: 0, width: baseWidth + horizontalMargin * 2, height: baseHeight + verticalMargin * 2),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -189,13 +224,13 @@ class StatusBubble {
         panel.isMovable = false
         panel.hidesOnDeactivate = false
 
-        let key = ObjectIdentifier(screen)
         panels[key] = panel
 
         guard let contentView = panel.contentView else { return panel }
 
-        let bubble = BubbleView(frame: contentView.bounds)
-        bubble.autoresizingMask = [.width, .height]
+        let bubble = BubbleView(frame: NSRect(x: horizontalMargin, y: verticalMargin, width: baseWidth, height: baseHeight))
+        bubble.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        bubble.onInteract = { [weak self] in self?.stopPulsing() }
         bubbles[key] = bubble
 
         let label = NSTextField(labelWithString: "")
@@ -228,6 +263,11 @@ private class BubbleView: NSView {
     }
 
     var tailDirection: TailDirection = .down
+    var onInteract: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onInteract?()
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         let radius: CGFloat = 12
