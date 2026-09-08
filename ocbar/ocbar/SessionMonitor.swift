@@ -39,9 +39,9 @@ class SessionMonitor {
 
         for server in discovered where knownServers[server.port] == nil {
             guard await isOpenCode(port: server.port) else { continue }
-            var dir = await projectPath(port: server.port)
+            var dir = await Task.detached { ProcessScanner.cwd(pid: server.pid) }.value
             if dir.isEmpty || dir == "/" {
-                dir = await Task.detached { ProcessScanner.cwd(pid: server.pid) }.value
+                dir = await projectPath(port: server.port)
             }
             knownServers[server.port] = (dir: dir, pid: server.pid)
             previousServerStatus[server.port] = .idle
