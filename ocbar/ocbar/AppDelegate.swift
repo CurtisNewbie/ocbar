@@ -37,54 +37,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem.button else { return }
         currentState = state
 
-        let busyCount = state.sessions.filter { $0.status == .busy }.count
-        let idleCount = state.sessions.filter { $0.status == .idle }.count
-        let waitingCount = state.sessions.filter { $0.status == .waiting }.count
-        let errorCount = state.sessions.filter { $0.status == .error }.count
-
-        let color: NSColor
-        let label: String
-
-        if state.sessions.isEmpty {
-            color = .secondaryLabelColor
-            label = "No Opencode Session"
-        } else if errorCount > 0 {
-            color = .systemRed
-            label = "\(errorCount) error"
-        } else if waitingCount > 0 {
-            color = .systemBlue
-            label = busyCount > 0 ? "\(waitingCount) waiting · \(busyCount) busy" : "\(waitingCount) waiting"
-        } else if idleCount > 0 && busyCount > 0 {
-            color = .systemGreen
-            label = "\(busyCount) busy · \(idleCount) idle"
-        } else if idleCount > 0 {
-            color = .systemGreen
-            label = "\(idleCount) idle"
-        } else {
-            color = .systemOrange
-            label = "\(busyCount) busy"
-        }
-
         let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
-        if let base = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil) {
-            button.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: color)
-        }
-        button.imagePosition = .imageLeft
         let attrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor.labelColor,
             .font: NSFont.menuBarFont(ofSize: 13)
         ]
-        if (1...projectsShown).contains(state.sessions.count) {
+
+        let total = state.sessions.count
+        if total == 0 {
+            button.image = nil
+            if let base = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil) {
+                button.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: .secondaryLabelColor)
+            }
+            button.imagePosition = .imageLeft
+            button.attributedTitle = NSAttributedString(string: " No Opencode Session", attributes: attrs)
+        } else if total <= projectsShown {
             button.image = nil
             button.attributedTitle = sessionTitle(for: state.sessions, attributes: attrs)
         } else {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
             button.image = nil
-            if let base = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil) {
-                button.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: color)
-            }
-            button.imagePosition = .imageLeft
-            button.attributedTitle = NSAttributedString(string: " \(label)", attributes: attrs)
+            button.attributedTitle = foldedTitle(for: state.sessions, attributes: attrs)
         }
 
         let sessions = state.sessions
@@ -203,6 +175,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 title.append(NSAttributedString(attachment: attachment))
             }
             title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
+        }
+
+        return title
+    }
+
+    private func foldedTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        let title = NSMutableAttributedString()
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+
+        let active = sessions.filter { $0.status != .idle }
+        let idle = sessions.filter { $0.status == .idle }
+
+        for session in active {
+            if title.length > 0 {
+                title.append(NSAttributedString(string: "  ·  ", attributes: attributes))
+            }
+
+            let appearance = statusAppearance(for: session.status)
+            if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: session.status.rawValue) {
+                let img = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
+                let attachment = NSTextAttachment()
+                attachment.image = img
+                // Nudge down so glyph center aligns with text center (glyph sits ~1.84pt high otherwise)
+                attachment.bounds = NSRect(x: 0, y: -1.84, width: img.size.width, height: img.size.height)
+                title.append(NSAttributedString(attachment: attachment))
+            }
+            title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
+        }
+
+        if !idle.isEmpty {
+            if title.length > 0 {
+                title.append(NSAttributedString(string: "  ·  ", attributes: attributes))
+            }
+
+            let appearance = statusAppearance(for: .idle)
+            if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: SessionStatus.idle.rawValue) {
+                let img = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
+                let attachment = NSTextAttachment()
+                attachment.image = img
+                attachment.bounds = NSRect(x: 0, y: -1.84, width: img.size.width, height: img.size.height)
+                title.append(NSAttributedString(attachment: attachment))
+            }
+            title.append(NSAttributedString(string: " \(idle.count) idle", attributes: attributes))
         }
 
         return title

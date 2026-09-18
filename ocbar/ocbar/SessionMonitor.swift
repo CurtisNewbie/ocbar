@@ -77,8 +77,31 @@ class SessionMonitor {
             sessions.append(SessionInfo(id: "\(port)", status: status, port: port, projectDir: info.dir))
         }
 
+        sessions.sort { lhs, rhs in
+            let lr = attentionRank(lhs.status)
+            let rr = attentionRank(rhs.status)
+            if lr != rr { return lr < rr }
+            let byName = projectName(for: lhs.projectDir).localizedStandardCompare(projectName(for: rhs.projectDir))
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return lhs.port < rhs.port
+        }
+
         state.sessions = sessions
         onStateChange(state)
+    }
+
+    private func attentionRank(_ status: SessionStatus) -> Int {
+        switch status {
+        case .error: return 0
+        case .waiting: return 1
+        case .busy: return 2
+        case .idle: return 3
+        }
+    }
+
+    private func projectName(for dir: String) -> String {
+        guard !dir.isEmpty && dir != "/" else { return "" }
+        return URL(fileURLWithPath: dir).lastPathComponent
     }
 
     private func isOpenCode(port: Int) async -> Bool {
