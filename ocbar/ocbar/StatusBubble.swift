@@ -159,24 +159,37 @@ class StatusBubble {
         }
 
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            for panel in self.panels.values {
-                NSAnimationContext.runAnimationGroup({ ctx in
-                    ctx.duration = 0.4
-                    panel.animator().alphaValue = 0
-                }, completionHandler: {
-                    panel.orderOut(nil)
-                })
-            }
+            self?.dismissAll()
         }
         dismissWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: work)
     }
 
     func stopPulsing() {
         for panel in panels.values {
             panel.contentView?.layer?.removeAnimation(forKey: "bubblePulse")
         }
+    }
+
+    private func dismissAll() {
+        for panel in panels.values {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.4
+                panel.animator().alphaValue = 0
+            }, completionHandler: {
+                panel.orderOut(nil)
+            })
+        }
+    }
+
+    private func dismissNow() {
+        dismissWork?.cancel()
+        dismissAll()
+    }
+
+    private func interact() {
+        stopPulsing()
+        dismissNow()
     }
 
     private func attributedTitle(text: String, color: NSColor, symbol: String) -> NSAttributedString {
@@ -230,7 +243,7 @@ class StatusBubble {
 
         let bubble = BubbleView(frame: NSRect(x: horizontalMargin, y: verticalMargin, width: baseWidth, height: baseHeight))
         bubble.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
-        bubble.onInteract = { [weak self] in self?.stopPulsing() }
+        bubble.onInteract = { [weak self] in self?.interact() }
         bubbles[key] = bubble
 
         let label = NSTextField(labelWithString: "")
