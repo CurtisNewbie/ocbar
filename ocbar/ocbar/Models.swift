@@ -7,7 +7,6 @@ enum SessionStatus: String {
 struct SessionInfo: Equatable {
     let id: String
     var status: SessionStatus
-    let port: Int
     var projectDir: String
 }
 

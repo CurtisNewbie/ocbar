@@ -2,6 +2,8 @@
 
 macOS menubar app that monitors [OpenCode](https://opencode.ai) sessions across all your terminals.
 
+> **OpenCode v2 required.** ocbar targets OpenCode v2 only. v1 is no longer supported — v1 users should use git tag `oc_v1` (`git checkout oc_v1`), the last v1-compatible version.
+
 ## What it does
 
 Shows a live status indicator in your menubar so you know when agents finish without watching the terminal.
@@ -22,16 +24,19 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 
 ## How it works
 
-- Every 1s: scans `ps aux` for `opencode` processes; port from `--port` flag, else discovered via `lsof` listening sockets
-- Every 200ms: polls `GET /session/status` on each discovered port
-
-> **Limitation:** sessions must be started with `--port` — bare `opencode` starts no HTTP server, so it cannot be monitored. `opencode --port 0` works (auto-selects a port).
+- Reads `~/.local/state/opencode/service.json` (url, pid, version, password) to locate the shared OpenCode v2 service
+- Authenticates with HTTP Basic auth (username `opencode`, password from that file)
+- Every 2s: `GET /api/info` to check the service is up
+- Every 0.5s: `GET /api/session/active` for busy sessions and `GET /api/session?limit=100&order=desc` for the session list and project directory
+- `GET /api/form` and `GET /api/permission/request`, scoped by `location[directory]=<dir>`, for pending user input. Only directories with active or recently active sessions are checked
+- A session is shown only while a live `opencode` client (TUI or CLI) is attached in its directory — client-less orphaned sessions are ignored
+- Only root sessions (top-level sessions you interact with, not subagent children) that are active/waiting or updated within the last 30 minutes are shown, labeled by project folder name
 
 ## Requirements
 
 - macOS 13+
 - Xcode Command Line Tools (`xcode-select --install`)
-- [OpenCode](https://opencode.ai) installed
+- [OpenCode](https://opencode.ai) v2 installed
 
 ## Build & run
 

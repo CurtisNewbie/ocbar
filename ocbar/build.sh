@@ -10,7 +10,6 @@ swiftc \
   -sdk "$SDK" \
   -target arm64-apple-macos13.0 \
   "$DIR/ocbar/Models.swift" \
-  "$DIR/ocbar/ProcessScanner.swift" \
   "$DIR/ocbar/OpenCodeClient.swift" \
   "$DIR/ocbar/SessionMonitor.swift" \
   "$DIR/ocbar/StatusBubble.swift" \

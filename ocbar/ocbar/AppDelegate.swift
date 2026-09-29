@@ -224,8 +224,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func sessionName(for session: SessionInfo) -> String {
-        let raw = URL(fileURLWithPath: session.projectDir).lastPathComponent
-        return (session.projectDir.isEmpty || session.projectDir == "/") ? "port \(session.port)" : raw
+        if !session.projectDir.isEmpty && session.projectDir != "/" {
+            return URL(fileURLWithPath: session.projectDir).lastPathComponent
+        }
+        return session.id.isEmpty ? "session" : String(session.id.suffix(6))
     }
 
     private func statusAppearance(for status: SessionStatus) -> (symbol: String, color: NSColor) {

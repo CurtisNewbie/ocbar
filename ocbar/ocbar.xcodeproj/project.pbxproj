@@ -10,7 +10,6 @@
 		DD0000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000001 /* main.swift */; };
 		DD0000000000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000002 /* AppDelegate.swift */; };
 		DD0000000000000000000003 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000003 /* Models.swift */; };
-		DD0000000000000000000004 /* ProcessScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000004 /* ProcessScanner.swift */; };
 		DD0000000000000000000005 /* OpenCodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000005 /* OpenCodeClient.swift */; };
 		DD0000000000000000000006 /* SessionMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000006 /* SessionMonitor.swift */; };
 /* End PBXBuildFile section */
@@ -19,7 +18,6 @@
 		EE0000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		EE0000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		EE0000000000000000000003 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		EE0000000000000000000004 /* ProcessScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessScanner.swift; sourceTree = "<group>"; };
 		EE0000000000000000000005 /* OpenCodeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeClient.swift; sourceTree = "<group>"; };
 		EE0000000000000000000006 /* SessionMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMonitor.swift; sourceTree = "<group>"; };
 		EE0000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -51,7 +49,6 @@
 				EE0000000000000000000001 /* main.swift */,
 				EE0000000000000000000002 /* AppDelegate.swift */,
 				EE0000000000000000000003 /* Models.swift */,
-				EE0000000000000000000004 /* ProcessScanner.swift */,
 				EE0000000000000000000005 /* OpenCodeClient.swift */,
 				EE0000000000000000000006 /* SessionMonitor.swift */,
 				EE0000000000000000000007 /* Info.plist */,
@@ -133,7 +130,6 @@
 				DD0000000000000000000001 /* main.swift in Sources */,
 				DD0000000000000000000002 /* AppDelegate.swift in Sources */,
 				DD0000000000000000000003 /* Models.swift in Sources */,
-				DD0000000000000000000004 /* ProcessScanner.swift in Sources */,
 				DD0000000000000000000005 /* OpenCodeClient.swift in Sources */,
 				DD0000000000000000000006 /* SessionMonitor.swift in Sources */,
 			);
