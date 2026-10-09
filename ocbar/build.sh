@@ -26,5 +26,12 @@ mkdir -p "$APP/Contents/Resources"
 cp "$DIR/ocbar_bin" "$APP/Contents/MacOS/ocbar"
 cp "$DIR/ocbar/Info.plist" "$APP/Contents/Info.plist"
 
+DEST="$HOME/Applications"
+echo "Installing to $DEST..."
+mkdir -p "$DEST"
+rm -rf "$DEST/ocbar.app"
+cp -R "$APP" "$DEST/"
+
 echo "Done: $APP"
-echo "Run with: open $APP"
+echo "Installed: $DEST/ocbar.app"
+echo "Run with: open $DEST/ocbar.app"
