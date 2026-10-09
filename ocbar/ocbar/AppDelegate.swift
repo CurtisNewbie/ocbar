@@ -8,6 +8,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastSessions: [SessionInfo]? = nil
     private var currentState = AppState()
     private var bubble: StatusBubble!
+    private var spinnerTimer: Timer?
+    private var spinnerAngle: CGFloat = 0
+    private var busyMenuItems: [NSMenuItem] = []
     private let projectsShownKey = "ocbar.projectsShown"
     private let defaultProjectsShown = 4
     private let bubblePositionsKey = "ocbar.bubblePositions"
@@ -36,8 +39,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func render(_ state: AppState, forceMenuRefresh: Bool = false) {
-        guard let button = statusItem.button else { return }
         currentState = state
+        updateButton(for: state)
+        updateSpinner()
+
+        let sessions = state.sessions
+        guard forceMenuRefresh || sessions != lastSessions else { return }
+        lastSessions = sessions
+
+        menu.removeAllItems()
+        busyMenuItems.removeAll()
+        if sessions.isEmpty {
+            menu.addItem(menuLabel("No OpenCode sessions"))
+        } else {
+            for s in sessions {
+                let item = sessionItem(name: sessionName(for: s), status: s.status)
+                if s.status == .busy { busyMenuItems.append(item) }
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(.separator())
+        menu.addItem(projectsShownMenu())
+        menu.addItem(bubblePositionMenu())
+        menu.addItem(bubbleSecondsMenu())
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    private func updateButton(for state: AppState) {
+        guard let button = statusItem.button else { return }
 
         let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
         let attrs: [NSAttributedString.Key: Any] = [
@@ -60,25 +90,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.image = nil
             button.attributedTitle = foldedTitle(for: state.sessions, attributes: attrs)
         }
+    }
 
-        let sessions = state.sessions
-        guard forceMenuRefresh || sessions != lastSessions else { return }
-        lastSessions = sessions
-
-        menu.removeAllItems()
-        if sessions.isEmpty {
-            menu.addItem(menuLabel("No OpenCode sessions"))
-        } else {
-            for s in sessions {
-                menu.addItem(sessionItem(name: sessionName(for: s), status: s.status))
+    private func updateSpinner() {
+        let busy = currentState.sessions.contains { $0.status == .busy }
+        if busy {
+            guard spinnerTimer == nil else { return }
+            let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
+                self?.tickSpinner()
             }
+            RunLoop.main.add(timer, forMode: .common)
+            spinnerTimer = timer
+        } else if let timer = spinnerTimer {
+            timer.invalidate()
+            spinnerTimer = nil
+            spinnerAngle = 0
         }
-        menu.addItem(.separator())
-        menu.addItem(projectsShownMenu())
-        menu.addItem(bubblePositionMenu())
-        menu.addItem(bubbleSecondsMenu())
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    private func tickSpinner() {
+        // Rotate clockwise to match the arrow's direction.
+        spinnerAngle = (spinnerAngle - 30).truncatingRemainder(dividingBy: 360)
+        updateButton(for: currentState)
+        for item in busyMenuItems {
+            item.image = busySpinnerImage(color: .systemOrange, pointSize: 13)
+        }
     }
 
     private var projectsShown: Int {
@@ -200,8 +236,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             let appearance = statusAppearance(for: session.status)
-            if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: session.status.rawValue) {
-                let img = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
+            if let img = statusGlyphImage(appearance: appearance, status: session.status, cfg: cfg) {
                 let attachment = NSTextAttachment()
                 attachment.image = img
                 // Nudge down so glyph center aligns with text center (glyph sits ~1.84pt high otherwise)
@@ -227,8 +262,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             let appearance = statusAppearance(for: session.status)
-            if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: session.status.rawValue) {
-                let img = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
+            if let img = statusGlyphImage(appearance: appearance, status: session.status, cfg: cfg) {
                 let attachment = NSTextAttachment()
                 attachment.image = img
                 // Nudge down so glyph center aligns with text center (glyph sits ~1.84pt high otherwise)
@@ -267,7 +301,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func statusAppearance(for status: SessionStatus) -> (symbol: String, color: NSColor) {
         switch status {
         case .busy:
-            return ("circle.fill", .systemOrange)
+            return ("arrow.clockwise.circle.fill", .systemOrange)
         case .waiting:
             return ("questionmark.circle.fill", .systemBlue)
         case .idle:
@@ -277,11 +311,96 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func statusGlyphImage(appearance: (symbol: String, color: NSColor), status: SessionStatus, cfg: NSImage.SymbolConfiguration) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: status.rawValue) else { return nil }
+        let configured = base.withSymbolConfiguration(cfg) ?? base
+        if status == .busy {
+            return busySpinnerImage(color: appearance.color)
+        }
+        return tint(configured, color: appearance.color)
+    }
+
+    // The busy spinner is drawn as vector paths so it stays crisp at every angle.
+    // A solid disc with a rotating gap keeps the same visual mass as the idle
+    // check-circle (also a disc with a knocked-out mark) and matches its outer
+    // diameter, so the running state reads as solid and bright as the green disc.
+    private func busySpinnerImage(color: NSColor, pointSize: CGFloat = 11) -> NSImage {
+        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
+        let canvas = Self.symbolImageSize("checkmark.circle.fill", cfg: cfg)
+        let diameter = (Self.visualGlyphDiameter(symbol: "checkmark.circle.fill", cfg: cfg) ?? 12) * spinnerOpticalScale
+        let radius = diameter / 2
+        return NSImage(size: canvas, flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
+                                        width: radius * 2, height: radius * 2)).fill()
+
+            // Knock out a rotating gap. spinnerAngle decreases each tick, which
+            // is clockwise in this unflipped space, matching the arrow's
+            // former direction.
+            guard let ctx = NSGraphicsContext.current else { return true }
+            ctx.compositingOperation = .clear
+            let gap = NSBezierPath()
+            gap.move(to: center)
+            gap.appendArc(withCenter: center, radius: radius,
+                          startAngle: self.spinnerAngle, endAngle: self.spinnerAngle - self.spinnerWedgeDegrees,
+                          clockwise: true)
+            gap.close()
+            gap.fill()
+            return true
+        }
+    }
+
+    // Busy spinner geometry. The canvas matches the idle check-circle's symbol
+    // image size so the attachment baseline offset is unchanged, and the disc's
+    // outer diameter is matched to the green disc's circle. The wedge removes a
+    // similar fraction of area as the checkmark does from the idle disc.
+    private let spinnerWedgeDegrees: CGFloat = 70
+    private let spinnerOpticalScale: CGFloat = 1.0
+
+    private static func symbolImageSize(_ symbol: String, cfg: NSImage.SymbolConfiguration) -> NSSize {
+        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else {
+            return NSSize(width: 14, height: 14)
+        }
+        return (base.withSymbolConfiguration(cfg) ?? base).size
+    }
+
+    // Diameter of a glyph's circle, measured from its opaque bounds so different
+    // SF Symbols can be compared regardless of their image padding.
+    private static func visualGlyphDiameter(symbol: String, cfg: NSImage.SymbolConfiguration) -> CGFloat? {
+        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else { return nil }
+        let image = base.withSymbolConfiguration(cfg) ?? base
+        let scale: CGFloat = 8
+        let px = Int((max(image.size.width, image.size.height) * scale).rounded())
+        guard px > 0,
+              let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.clear(CGRect(x: 0, y: 0, width: px, height: px))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        image.draw(in: NSRect(x: 0, y: 0, width: CGFloat(px), height: CGFloat(px)))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = ctx.data else { return nil }
+        let ptr = data.bindMemory(to: UInt8.self, capacity: px * px * 4)
+        var minX = px, maxX = -1, minY = px, maxY = -1
+        for y in 0..<px { for x in 0..<px where ptr[(y * px + x) * 4 + 3] > 128 {
+            if x < minX { minX = x }
+            if x > maxX { maxX = x }
+            if y < minY { minY = y }
+            if y > maxY { maxY = y }
+        } }
+        guard maxX >= 0, maxY >= 0 else { return nil }
+        return CGFloat(max(maxX - minX + 1, maxY - minY + 1)) / scale
+    }
+
     private func sessionItem(name: String, status: SessionStatus) -> NSMenuItem {
         let appearance = statusAppearance(for: status)
         let item = NSMenuItem(title: "\(name) — \(status.rawValue)", action: nil, keyEquivalent: "")
         let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: status.rawValue) {
+        if status == .busy {
+            item.image = busySpinnerImage(color: appearance.color, pointSize: 13)
+        } else if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: status.rawValue) {
             item.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
         }
         item.isEnabled = true
