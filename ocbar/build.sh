@@ -35,4 +35,7 @@ cp -R "$APP" "$DEST/"
 echo "Done: $APP"
 echo "Installed: $DEST/ocbar.app"
 echo "Opening $DEST/ocbar.app"
+# open() only activates an already-running instance; quit it so the new build loads.
+pkill -x ocbar 2>/dev/null || true
+sleep 0.3
 open "$DEST/ocbar.app"
