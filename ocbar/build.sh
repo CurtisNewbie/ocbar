@@ -34,4 +34,5 @@ cp -R "$APP" "$DEST/"
 
 echo "Done: $APP"
 echo "Installed: $DEST/ocbar.app"
-echo "Run with: open $DEST/ocbar.app"
+echo "Opening $DEST/ocbar.app"
+open "$DEST/ocbar.app"
