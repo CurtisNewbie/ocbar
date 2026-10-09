@@ -11,6 +11,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let projectsShownKey = "ocbar.projectsShown"
     private let defaultProjectsShown = 4
     private let bubblePositionsKey = "ocbar.bubblePositions"
+    private let bubbleSecondsKey = "ocbar.bubbleSeconds"
+    private let defaultBubbleSeconds = 10
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -74,6 +76,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(projectsShownMenu())
         menu.addItem(bubblePositionMenu())
+        menu.addItem(bubbleSecondsMenu())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -147,6 +150,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             current.insert(tapped)
         }
         UserDefaults.standard.set(current.map { $0.rawValue }, forKey: bubblePositionsKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    private var bubbleSeconds: Int {
+        guard let stored = UserDefaults.standard.object(forKey: bubbleSecondsKey) as? Int,
+              [5, 10, 20, 30, 60].contains(stored) else {
+            return defaultBubbleSeconds
+        }
+        return stored
+    }
+
+    private func bubbleSecondsMenu() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for seconds in [5, 10, 20, 30, 60] {
+            let item = NSMenuItem(title: "\(seconds)s", action: #selector(bubbleSecondsSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = seconds
+            item.state = seconds == bubbleSeconds ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Bubble duration", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    @objc private func bubbleSecondsSelected(_ sender: NSMenuItem) {
+        guard [5, 10, 20, 30, 60].contains(sender.tag) else { return }
+        UserDefaults.standard.set(sender.tag, forKey: bubbleSecondsKey)
         render(currentState, forceMenuRefresh: true)
     }
 
@@ -272,7 +306,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         bounceIcon()
-        bubble.show(anchor: statusItem.button, text: text, color: color, symbol: symbol, positions: Array(bubblePositions))
+        bubble.show(anchor: statusItem.button, text: text, color: color, symbol: symbol, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds))
     }
 
     private func bounceIcon() {

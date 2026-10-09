@@ -45,7 +45,7 @@ class StatusBubble {
     private var labelCenters: [PanelKey: (x: NSLayoutConstraint, y: NSLayoutConstraint)] = [:]
     private var dismissWork: DispatchWorkItem?
 
-    func show(anchor: NSView?, text: String, color: NSColor, symbol: String, positions: [BubblePosition]) {
+    func show(anchor: NSView?, text: String, color: NSColor, symbol: String, positions: [BubblePosition], seconds: TimeInterval) {
         dismissWork?.cancel()
 
         let screens = NSScreen.screens
@@ -162,7 +162,7 @@ class StatusBubble {
             self?.dismissAll()
         }
         dismissWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     func stopPulsing() {
