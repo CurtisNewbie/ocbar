@@ -15,6 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let defaultProjectsShown = 4
     private let bubblePositionsKey = "ocbar.bubblePositions"
     private let bubbleSecondsKey = "ocbar.bubbleSeconds"
+    private let bubbleColorKey = "ocbar.bubbleColor"
     private let defaultBubbleSeconds = 10
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -62,6 +63,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(projectsShownMenu())
         menu.addItem(bubblePositionMenu())
         menu.addItem(bubbleSecondsMenu())
+        menu.addItem(bubbleColorMenu())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -217,6 +219,58 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func bubbleSecondsSelected(_ sender: NSMenuItem) {
         guard [5, 10, 20, 30, 60].contains(sender.tag) else { return }
         UserDefaults.standard.set(sender.tag, forKey: bubbleSecondsKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    private enum BubbleColor: String, CaseIterable {
+        case system
+        case light
+        case dark
+
+        var displayName: String {
+            switch self {
+            case .system: return "System"
+            case .light: return "Light"
+            case .dark: return "Dark"
+            }
+        }
+
+        var color: NSColor {
+            switch self {
+            case .system: return .windowBackgroundColor
+            case .light: return .white
+            case .dark: return NSColor(white: 0.12, alpha: 1)
+            }
+        }
+    }
+
+    private var bubbleColor: BubbleColor {
+        guard let raw = UserDefaults.standard.string(forKey: bubbleColorKey),
+              let color = BubbleColor(rawValue: raw) else { return .system }
+        return color
+    }
+
+    private func bubbleColorMenu() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for (index, color) in BubbleColor.allCases.enumerated() {
+            let item = NSMenuItem(title: color.displayName, action: #selector(bubbleColorSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = color == bubbleColor ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Bubble color", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    @objc private func bubbleColorSelected(_ sender: NSMenuItem) {
+        let all = BubbleColor.allCases
+        guard all.indices.contains(sender.tag) else { return }
+        UserDefaults.standard.set(all[sender.tag].rawValue, forKey: bubbleColorKey)
         render(currentState, forceMenuRefresh: true)
     }
 
@@ -409,23 +463,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showBubble(status: SessionStatus, projectDir: String) {
         let name = displayName(for: projectDir)
-        let text: String
+        let body: String
         let color: NSColor
         let symbol: String
         switch status {
         case .idle:
-            text = "\(name) ready"
+            body = "Ready"
             color = .systemGreen
             symbol = "checkmark.circle.fill"
         case .waiting:
-            text = "\(name) needs input"
+            body = "Needs input"
             color = .systemBlue
             symbol = "questionmark.circle.fill"
         default:
             return
         }
         bounceIcon()
-        bubble.show(anchor: statusItem.button, text: text, color: color, symbol: symbol, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds))
+        bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds))
     }
 
     private func bounceIcon() {
