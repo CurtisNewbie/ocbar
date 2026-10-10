@@ -246,7 +246,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var bubbleColor: BubbleColor {
         guard let raw = UserDefaults.standard.string(forKey: bubbleColorKey),
-              let color = BubbleColor(rawValue: raw) else { return .system }
+              let color = BubbleColor(rawValue: raw) else { return .light }
         return color
     }
 
