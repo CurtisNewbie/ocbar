@@ -11,6 +11,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var spinnerTimer: Timer?
     private var spinnerAngle: CGFloat = 0
     private var busyMenuItems: [NSMenuItem] = []
+    private var busyTitleAttachments: [NSTextAttachment] = []
+    private var currentButtonTitle: NSAttributedString?
     private let projectsShownKey = "ocbar.projectsShown"
     private let defaultProjectsShown = 4
     private let bubblePositionsKey = "ocbar.bubblePositions"
@@ -84,13 +86,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 button.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: .secondaryLabelColor)
             }
             button.imagePosition = .imageLeft
+            busyTitleAttachments = []
+            currentButtonTitle = nil
             button.attributedTitle = NSAttributedString(string: " No Opencode Session", attributes: attrs)
         } else if total <= projectsShown {
             button.image = nil
-            button.attributedTitle = sessionTitle(for: state.sessions, attributes: attrs)
+            let built = sessionTitle(for: state.sessions, attributes: attrs)
+            busyTitleAttachments = built.busyAttachments
+            currentButtonTitle = built.title
+            button.attributedTitle = built.title
         } else {
             button.image = nil
-            button.attributedTitle = foldedTitle(for: state.sessions, attributes: attrs)
+            let built = foldedTitle(for: state.sessions, attributes: attrs)
+            busyTitleAttachments = built.busyAttachments
+            currentButtonTitle = built.title
+            button.attributedTitle = built.title
         }
     }
 
@@ -98,7 +108,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let busy = currentState.sessions.contains { $0.status == .busy }
         if busy {
             guard spinnerTimer == nil else { return }
-            let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 0.06, repeats: true) { [weak self] _ in
                 self?.tickSpinner()
             }
             RunLoop.main.add(timer, forMode: .common)
@@ -111,9 +121,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func tickSpinner() {
-        // Rotate clockwise to match the arrow's direction.
-        spinnerAngle = (spinnerAngle - 30).truncatingRemainder(dividingBy: 360)
-        updateButton(for: currentState)
+        // Rotate clockwise to match the arrow's direction. 45° per 0.06s
+        // tick keeps the apparent speed at ~750°/s while running ~16.7 fps.
+        spinnerAngle = (spinnerAngle - 45).truncatingRemainder(dividingBy: 360)
+        // Swap the busy glyphs inside the already-built title instead of
+        // rebuilding the whole attributed string every frame.
+        if !busyTitleAttachments.isEmpty, let title = currentButtonTitle {
+            let img = busySpinnerImage(color: .systemOrange, pointSize: 11)
+            for attachment in busyTitleAttachments {
+                attachment.image = img
+            }
+            statusItem.button?.attributedTitle = title
+        }
         for item in busyMenuItems {
             item.image = busySpinnerImage(color: .systemOrange, pointSize: 13)
         }
@@ -280,9 +299,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    private func sessionTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
+    private func sessionTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> (title: NSAttributedString, busyAttachments: [NSTextAttachment]) {
         let title = NSMutableAttributedString()
         let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        var busyAttachments: [NSTextAttachment] = []
 
         for (index, session) in sessions.enumerated() {
             if index > 0 {
@@ -296,16 +316,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // Nudge down so glyph center aligns with text center (glyph sits ~1.84pt high otherwise)
                 attachment.bounds = NSRect(x: 0, y: -1.84, width: img.size.width, height: img.size.height)
                 title.append(NSAttributedString(attachment: attachment))
+                if session.status == .busy { busyAttachments.append(attachment) }
             }
             title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
         }
 
-        return title
+        return (title, busyAttachments)
     }
 
-    private func foldedTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
+    private func foldedTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> (title: NSAttributedString, busyAttachments: [NSTextAttachment]) {
         let title = NSMutableAttributedString()
         let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        var busyAttachments: [NSTextAttachment] = []
 
         let active = sessions.filter { $0.status != .idle }
         let idle = sessions.filter { $0.status == .idle }
@@ -322,6 +344,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // Nudge down so glyph center aligns with text center (glyph sits ~1.84pt high otherwise)
                 attachment.bounds = NSRect(x: 0, y: -1.84, width: img.size.width, height: img.size.height)
                 title.append(NSAttributedString(attachment: attachment))
+                if session.status == .busy { busyAttachments.append(attachment) }
             }
             title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
         }
@@ -342,7 +365,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             title.append(NSAttributedString(string: " \(idle.count) idle", attributes: attributes))
         }
 
-        return title
+        return (title, busyAttachments)
     }
 
     private func sessionName(for session: SessionInfo) -> String {
@@ -379,10 +402,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // check-circle (also a disc with a knocked-out mark) and matches its outer
     // diameter, so the running state reads as solid and bright as the green disc.
     private func busySpinnerImage(color: NSColor, pointSize: CGFloat = 11) -> NSImage {
-        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
-        let canvas = Self.symbolImageSize("checkmark.circle.fill", cfg: cfg)
-        let diameter = (Self.visualGlyphDiameter(symbol: "checkmark.circle.fill", cfg: cfg) ?? 12) * spinnerOpticalScale
-        let radius = diameter / 2
+        let geometry = Self.spinnerGeometry(pointSize: pointSize)
+        let canvas = geometry.canvas
+        let radius = geometry.diameter / 2
         return NSImage(size: canvas, flipped: false) { rect in
             let center = NSPoint(x: rect.midX, y: rect.midY)
             color.setFill()
@@ -410,7 +432,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // outer diameter is matched to the green disc's circle. The wedge removes a
     // similar fraction of area as the checkmark does from the idle disc.
     private let spinnerWedgeDegrees: CGFloat = 70
-    private let spinnerOpticalScale: CGFloat = 1.0
+    private static let spinnerOpticalScale: CGFloat = 1.0
+
+    // Geometry is constant for a given (symbol, pointSize, weight), so the
+    // expensive glyph measurement is memoized per pointSize instead of being
+    // repeated every spinner frame.
+    private static var spinnerGeometryCache: [CGFloat: (canvas: NSSize, diameter: CGFloat)] = [:]
+
+    private static func spinnerGeometry(pointSize: CGFloat) -> (canvas: NSSize, diameter: CGFloat) {
+        if let cached = spinnerGeometryCache[pointSize] { return cached }
+        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
+        let canvas = symbolImageSize("checkmark.circle.fill", cfg: cfg)
+        let diameter = (visualGlyphDiameter(symbol: "checkmark.circle.fill", cfg: cfg) ?? 12) * spinnerOpticalScale
+        let geometry = (canvas: canvas, diameter: diameter)
+        spinnerGeometryCache[pointSize] = geometry
+        return geometry
+    }
 
     private static func symbolImageSize(_ symbol: String, cfg: NSImage.SymbolConfiguration) -> NSSize {
         guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else {
