@@ -50,16 +50,16 @@ xcode-select --install
 
 ```bash
 git clone https://github.com/CurtisNewbie/ocbar.git
-cd ocbar/ocbar
+cd ocbar
 ./build.sh
 ```
 
-This compiles the Swift sources and produces `ocbar.app` in the same directory.
+This compiles the Swift sources and produces `ocbar/ocbar.app`.
 
 **3. Run:**
 
 ```bash
-open ocbar.app
+open ocbar/ocbar.app
 ```
 
 The app runs as a menubar-only app (no Dock icon). You'll see the status indicator appear in your menubar immediately.
@@ -67,7 +67,7 @@ The app runs as a menubar-only app (no Dock icon). You'll see the status indicat
 **To find it with Spotlight (⌘+Space), copy it to your Applications folder:**
 
 ```bash
-cp -R ocbar.app /Applications/
+cp -R ocbar/ocbar.app /Applications/
 ```
 
 (Or `~/Applications/` for a per-user install.) Note: rebuilding with `./build.sh` overwrites only the project copy — recopy to `/Applications` after each rebuild. If Spotlight doesn't show it right away, run `mdimport /Applications/ocbar.app`.
@@ -77,7 +77,7 @@ cp -R ocbar.app /Applications/
 **To rebuild after code changes:**
 
 ```bash
-./build.sh && open ocbar.app
+./build.sh && open ocbar/ocbar.app
 ```
 
 > Note: If macOS blocks the app ("unidentified developer"), go to **System Settings → Privacy & Security** and click **Open Anyway**.

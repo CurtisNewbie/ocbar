@@ -3,10 +3,10 @@
 macOS menubar app (Swift/AppKit, no SwiftUI) that monitors OpenCode sessions across terminals. App code lives in `ocbar/`.
 
 ## Build & run
-- **Canonical build is `build.sh`, not Xcode.** From `ocbar/`:
+- **Canonical build is `build.sh` at the repo root, not Xcode.** From the repo root:
   ```bash
-  ./build.sh                # swiftc compile -> ocbar_bin, bundles ocbar.app
-  ./build.sh && open ocbar.app   # rebuild + launch after code changes
+  ./build.sh                            # swiftc compile -> ocbar/ocbar_bin, bundles ocbar/ocbar.app
+  ./build.sh && open ocbar/ocbar.app    # rebuild + launch after code changes
   ```
 - Requires Xcode Command Line Tools (`xcode-select --install`). Builds **arm64-only**, target `macos13.0`.
 - App is `LSUIElement` (menubar-only, no Dock icon). Notifications permission prompt appears on first run.
