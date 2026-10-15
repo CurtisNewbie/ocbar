@@ -56,7 +56,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(menuLabel("No OpenCode sessions"))
         } else {
             for s in sessions {
-                let item = sessionItem(name: sessionName(for: s), status: s.status)
+                let item = sessionItem(name: sessionName(for: s), status: s.status, pid: s.clientPID)
                 if s.status == .busy { busyMenuItems.append(item) }
                 menu.addItem(item)
             }
@@ -485,7 +485,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return CGFloat(max(maxX - minX + 1, maxY - minY + 1)) / scale
     }
 
-    private func sessionItem(name: String, status: SessionStatus) -> NSMenuItem {
+    private func sessionItem(name: String, status: SessionStatus, pid: Int32?) -> NSMenuItem {
         let appearance = statusAppearance(for: status)
         let item = NSMenuItem(title: "\(name) — \(status.rawValue)", action: nil, keyEquivalent: "")
         let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
@@ -495,7 +495,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
         }
         item.isEnabled = true
+        item.target = self
+        item.action = #selector(focusSessionFromMenu(_:))
+        item.representedObject = pid.map { NSNumber(value: $0) }
         return item
+    }
+
+    @MainActor @objc private func focusSessionFromMenu(_ sender: NSMenuItem) {
+        let pid = (sender.representedObject as? NSNumber)?.int32Value
+        monitor.focusSession(pid: pid)
     }
 
     private func showBubble(status: SessionStatus, projectDir: String, pid: Int32?) {
