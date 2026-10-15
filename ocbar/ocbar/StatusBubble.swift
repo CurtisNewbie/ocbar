@@ -34,6 +34,7 @@ class StatusBubble {
     private var icons: [PanelKey: NSImageView] = [:]
     private var titles: [PanelKey: NSTextField] = [:]
     private var bodies: [PanelKey: NSTextField] = [:]
+    private var closeButtons: [PanelKey: CloseButton] = [:]
     private var dismissWork: DispatchWorkItem?
     private let bounceClearance: CGFloat = 6
     /// Invoked on bubble click, before the bubble dismisses.
@@ -73,6 +74,10 @@ class StatusBubble {
                 titleLabel.textColor = primary
                 bodyLabel.stringValue = body
                 bodyLabel.textColor = secondary
+                if let closeButton = closeButtons[key] {
+                    closeButton.tintColor = secondary
+                    closeButton.hoverTintColor = primary
+                }
                 if bubble.background != background {
                     bubble.background = background
                     bubble.needsDisplay = true
@@ -273,14 +278,29 @@ class StatusBubble {
         bubble.addSubview(titleLabel)
         bubble.addSubview(bodyLabel)
 
+        let closeButton = CloseButton()
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.onClose = { [weak self] in
+            // Dismiss only — never jump to tmux.
+            self?.interact()
+        }
+        closeButtons[key] = closeButton
+        bubble.closeButton = closeButton
+        bubble.addSubview(closeButton)
+
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: bubble.leadingAnchor, constant: 14),
             icon.centerYAnchor.constraint(equalTo: bubble.centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 34),
             icon.heightAnchor.constraint(equalToConstant: 34),
 
+            closeButton.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -8),
+            closeButton.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 8),
+            closeButton.widthAnchor.constraint(equalToConstant: 18),
+            closeButton.heightAnchor.constraint(equalToConstant: 18),
+
             titleLabel.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
-            titleLabel.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -14),
+            titleLabel.trailingAnchor.constraint(equalTo: bubble.trailingAnchor, constant: -34),
             titleLabel.topAnchor.constraint(equalTo: bubble.topAnchor, constant: 13),
 
             bodyLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
@@ -295,15 +315,22 @@ class StatusBubble {
 private class BubbleView: NSView {
     var onInteract: (@MainActor () -> Void)?
     var background: NSColor = .windowBackgroundColor
+    /// The close affordance, which claims its own clicks so they never jump.
+    var closeButton: NSView?
 
     override func mouseDown(with event: NSEvent) {
         onInteract?()
     }
 
-    // Route every click to the card so clicking anywhere dismisses it, even on a label.
+    // Route every click to the card so clicking anywhere dismisses it, even on a
+    // label — except the close button, which handles its own clicks.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
-        return bounds.contains(local) ? self : nil
+        guard bounds.contains(local) else { return nil }
+        if let closeButton, closeButton.frame.contains(local) {
+            return closeButton.hitTest(local)
+        }
+        return self
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -314,5 +341,65 @@ private class BubbleView: NSView {
         NSColor.separatorColor.withAlphaComponent(0.6).setStroke()
         path.lineWidth = 1
         path.stroke()
+    }
+}
+
+/// Small "x" in the card's top-right corner. Highlights on hover; its own hit
+/// target, so clicking it never routes to the card's jump-to-tmux interaction.
+private class CloseButton: NSView {
+    var onClose: (@MainActor () -> Void)?
+    var tintColor: NSColor = .secondaryLabelColor {
+        didSet { needsDisplay = true }
+    }
+    var hoverTintColor: NSColor = .labelColor {
+        didSet { needsDisplay = true }
+    }
+    private var hovering = false {
+        didSet { needsDisplay = true }
+    }
+    private var tracking: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    // Swallow the press so it doesn't bubble up to the card's jump handler.
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) {
+            onClose?()
+        }
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if hovering {
+            let circle = NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1))
+            tintColor.withAlphaComponent(0.15).setFill()
+            circle.fill()
+        }
+        let r = bounds.insetBy(dx: 5, dy: 5)
+        let x = NSBezierPath()
+        x.lineWidth = 1.5
+        x.lineCapStyle = .round
+        x.move(to: NSPoint(x: r.minX, y: r.minY))
+        x.line(to: NSPoint(x: r.maxX, y: r.maxY))
+        x.move(to: NSPoint(x: r.minX, y: r.maxY))
+        x.line(to: NSPoint(x: r.maxX, y: r.minY))
+        (hovering ? hoverTintColor : tintColor).setStroke()
+        x.stroke()
     }
 }
