@@ -21,7 +21,7 @@ class SessionMonitor {
 
     /// A root session is shown while its work is active/waiting or its last
     /// update is newer than this window.
-    private static let recentWindow: TimeInterval = 1800
+    private static let recentWindow: TimeInterval = 600
 
     init(onStateChange: @escaping (AppState) -> Void) {
         self.onStateChange = onStateChange

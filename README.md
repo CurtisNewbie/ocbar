@@ -30,7 +30,7 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 - Every 0.5s: `GET /api/session/active` for busy sessions and `GET /api/session?limit=100&order=desc` for the session list and project directory
 - `GET /api/form` and `GET /api/permission/request`, scoped by `location[directory]=<dir>`, for pending user input. Only directories with active or recently active sessions are checked
 - A session is shown only while a live `opencode` client (TUI or CLI) is attached in its directory — client-less orphaned sessions are ignored
-- Only root sessions (top-level sessions you interact with, not subagent children) that are active/waiting or updated within the last 30 minutes are shown, labeled by project folder name
+- Only root sessions (top-level sessions you interact with, not subagent children) that are active/waiting or updated within the last 10 minutes are shown, labeled by project folder name
 
 ## Requirements
 
