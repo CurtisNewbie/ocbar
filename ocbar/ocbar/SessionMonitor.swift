@@ -13,10 +13,11 @@ class SessionMonitor {
     private var service: ServiceEndpoint?
     private var previousStatus: [String: SessionStatus] = [:]
     private var attachedDirs: Set<String> = []
+    private var clientPIDs: [String: Int32] = [:]
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
-    var onTransition: ((SessionStatus, String) -> Void)?
+    var onTransition: ((SessionStatus, String, Int32?) -> Void)?
 
     /// A root session is shown while its work is active/waiting or its last
     /// update is newer than this window.
@@ -42,14 +43,17 @@ class SessionMonitor {
         guard let endpoint = readService(), await isReady(endpoint) else {
             service = nil
             attachedDirs = []
+            clientPIDs = [:]
             await poll()
             return
         }
         service = endpoint
         let pid = endpoint.pid
-        attachedDirs = await Task.detached {
-            SessionMonitor.attachedDirectories(servicePID: pid)
+        let clients = await Task.detached {
+            SessionMonitor.attachedClients(servicePID: pid)
         }.value
+        attachedDirs = Set(clients.keys)
+        clientPIDs = clients
         await poll()
     }
 
@@ -126,8 +130,9 @@ class SessionMonitor {
             guard isWaiting || isBusy || recent else { continue }
 
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
-            guard attachedDirs.contains(Self.canonicalPath(dir)) else { continue }
-            sessions.append(SessionInfo(id: id, status: status, projectDir: dir))
+            let canonical = Self.canonicalPath(dir)
+            guard attachedDirs.contains(canonical) else { continue }
+            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: clientPIDs[canonical]))
         }
 
         publish(sessions: sessions)
@@ -195,11 +200,11 @@ class SessionMonitor {
             let prev = previousStatus[session.id] ?? .idle
             if prev != .waiting && session.status == .waiting {
                 sendWaitingNotification(projectDir: session.projectDir)
-                onTransition?(.waiting, session.projectDir)
+                onTransition?(.waiting, session.projectDir, session.clientPID)
             }
             if prev == .busy && session.status == .idle {
                 sendIdleNotification(projectDir: session.projectDir)
-                onTransition?(.idle, session.projectDir)
+                onTransition?(.idle, session.projectDir, session.clientPID)
             }
             previousStatus[session.id] = session.status
         }
@@ -254,9 +259,10 @@ class SessionMonitor {
     }
 
     /// Directories with an attached `opencode` client, excluding the shared
-    /// `opencode serve --service` process.
-    private nonisolated static func attachedDirectories(servicePID: Int32) -> Set<String> {
-        var dirs: Set<String> = []
+    /// `opencode serve --service` process. Maps canonicalized dir -> client pid
+    /// (first pid wins per dir), so a bubble click can focus the right tmux pane.
+    private nonisolated static func attachedClients(servicePID: Int32) -> [String: Int32] {
+        var clients: [String: Int32] = [:]
         let output = runShell("ps -Ao pid=,comm=")
         for line in output.components(separatedBy: "\n") {
             let cols = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
@@ -266,9 +272,12 @@ class SessionMonitor {
             guard pid != servicePID else { continue }
             let dir = cwd(pid: pid)
             guard !dir.isEmpty else { continue }
-            dirs.insert(canonicalPath(dir))
+            let canonical = canonicalPath(dir)
+            if clients[canonical] == nil {
+                clients[canonical] = pid
+            }
         }
-        return dirs
+        return clients
     }
 
     private nonisolated static func cwd(pid: Int32) -> String {
@@ -291,6 +300,39 @@ class SessionMonitor {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    /// Focus the tmux pane hosting the OpenCode client `pid` in Ghostty.
+    /// Runs off the main thread since it spawns processes + `osascript`.
+    func focusSession(pid: Int32?) {
+        let pidArg = pid.map(String.init) ?? ""
+        Task.detached {
+            _ = SessionMonitor.runShell(SessionMonitor.focusCommand(pid: pidArg))
+        }
+    }
+
+    private nonisolated static func focusCommand(pid: String) -> String {
+        // `tmux` lives in Homebrew paths that a GUI app's PATH doesn't include.
+        // The `osascript` call triggers a one-time macOS Automation permission
+        // prompt ("ocbar wants to control Ghostty"); denying it falls back to
+        // plain `open -a Ghostty`.
+        """
+        export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+        PID='\(pid)'
+        if [ -z "$PID" ] || ! command -v tmux >/dev/null 2>&1; then open -a Ghostty; exit 0; fi
+        PT=$(ps -o tty= -p "$PID" 2>/dev/null | tr -d ' ')
+        if [ -z "$PT" ]; then open -a Ghostty; exit 0; fi
+        ROW=$(tmux list-panes -a -F '#{pane_tty} #{pane_id} #{session_name}' 2>/dev/null | awk -v t="/dev/$PT" '$1==t{print $2" "$3; exit}')
+        if [ -z "$ROW" ]; then open -a Ghostty; exit 0; fi
+        PANE_ID=${ROW%% *}; SESS=${ROW#* }
+        CLIENT=$(tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null | awk -v s="$SESS" '$2==s{print $1; exit}')
+        if [ -n "$CLIENT" ]; then tmux switch-client -c "$CLIENT" -t "$PANE_ID" 2>/dev/null || true; fi
+        if [ -n "$CLIENT" ]; then
+          osascript -e "tell application \\"Ghostty\\" to focus (first terminal whose tty is \\"$CLIENT\\")" 2>/dev/null || open -a Ghostty
+        else
+          open -a Ghostty
+        fi
+        """
     }
 
     private func sendIdleNotification(projectDir: String) {

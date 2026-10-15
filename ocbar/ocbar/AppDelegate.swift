@@ -32,8 +32,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.render(state)
         }
         bubble = StatusBubble()
-        monitor.onTransition = { [weak self] status, dir in
-            self?.showBubble(status: status, projectDir: dir)
+        monitor.onTransition = { [weak self] status, dir, pid in
+            self?.showBubble(status: status, projectDir: dir, pid: pid)
         }
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -498,7 +498,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
-    private func showBubble(status: SessionStatus, projectDir: String) {
+    private func showBubble(status: SessionStatus, projectDir: String, pid: Int32?) {
         let name = displayName(for: projectDir)
         let body: String
         let color: NSColor
@@ -516,7 +516,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         bounceIcon()
-        bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds))
+        bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
+            self?.monitor.focusSession(pid: pid)
+        }
     }
 
     private func bounceIcon() {

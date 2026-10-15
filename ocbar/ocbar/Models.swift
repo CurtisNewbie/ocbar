@@ -8,6 +8,7 @@ struct SessionInfo: Equatable {
     let id: String
     var status: SessionStatus
     var projectDir: String
+    var clientPID: Int32? = nil
 }
 
 enum AggregateStatus {

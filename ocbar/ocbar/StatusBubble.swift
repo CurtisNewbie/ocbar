@@ -36,9 +36,13 @@ class StatusBubble {
     private var bodies: [PanelKey: NSTextField] = [:]
     private var dismissWork: DispatchWorkItem?
     private let bounceClearance: CGFloat = 6
+    /// Invoked on bubble click, before the bubble dismisses.
+    private var onClick: (@MainActor () -> Void)?
 
-    func show(anchor: NSView?, title: String, body: String, color: NSColor, symbol: String, background: NSColor, positions: [BubblePosition], seconds: TimeInterval) {
+    func show(anchor: NSView?, title: String, body: String, color: NSColor, symbol: String, background: NSColor, positions: [BubblePosition], seconds: TimeInterval, onClick: (@MainActor () -> Void)? = nil) {
         dismissWork?.cancel()
+        // Panels are reused across shows, so refresh the click handler each time.
+        self.onClick = onClick
 
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return }
@@ -237,7 +241,10 @@ class StatusBubble {
 
         let bubble = BubbleView(frame: contentView.bounds.insetBy(dx: padding, dy: padding))
         bubble.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
-        bubble.onInteract = { [weak self] in self?.interact() }
+        bubble.onInteract = { [weak self] in
+            self?.onClick?()
+            self?.interact()
+        }
         bubbles[key] = bubble
         contentView.addSubview(bubble)
 
@@ -286,7 +293,7 @@ class StatusBubble {
 
 /// Rounded notification-style card: hosts the icon and text, handles click-to-dismiss.
 private class BubbleView: NSView {
-    var onInteract: (() -> Void)?
+    var onInteract: (@MainActor () -> Void)?
     var background: NSColor = .windowBackgroundColor
 
     override func mouseDown(with event: NSEvent) {
