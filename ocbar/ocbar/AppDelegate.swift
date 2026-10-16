@@ -14,6 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var busyTitleAttachments: [NSTextAttachment] = []
     private var currentButtonTitle: NSAttributedString?
     private let projectsShownKey = "ocbar.projectsShown"
+    private let showSessionTimeKey = "ocbar.showSessionTime"
     private let defaultProjectsShown = 4
     private let bubblePositionsKey = "ocbar.bubblePositions"
     private let bubbleSecondsKey = "ocbar.bubbleSeconds"
@@ -55,8 +56,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if sessions.isEmpty {
             menu.addItem(menuLabel("No OpenCode sessions"))
         } else {
+            let nowMS = Date().timeIntervalSince1970 * 1000
             for s in sessions {
-                let item = sessionItem(name: sessionName(for: s), status: s.status, pid: s.clientPID)
+                let item = sessionItem(name: sessionName(for: s), status: s.status, pid: s.clientPID,
+                                       duration: showSessionTime ? formatDurationLabel(startedAtMS: s.startedAt, nowMS: nowMS) : "")
                 if s.status == .busy { busyMenuItems.append(item) }
                 menu.addItem(item)
             }
@@ -66,6 +69,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(bubblePositionMenu())
         menu.addItem(bubbleSecondsMenu())
         menu.addItem(bubbleColorMenu())
+        menu.addItem(showSessionTimeMenu())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -144,6 +148,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return defaultProjectsShown
         }
         return stored
+    }
+
+    private var showSessionTime: Bool {
+        guard let stored = UserDefaults.standard.object(forKey: showSessionTimeKey) as? Bool else { return true }
+        return stored
+    }
+
+    private func showSessionTimeMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Show session time", action: #selector(showSessionTimeToggled(_:)), keyEquivalent: "")
+        item.target = self
+        item.state = showSessionTime ? .on : .off
+        return item
+    }
+
+    @objc private func showSessionTimeToggled(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(!showSessionTime, forKey: showSessionTimeKey)
+        render(currentState, forceMenuRefresh: true)
     }
 
     private func projectsShownMenu() -> NSMenuItem {
@@ -485,9 +506,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return CGFloat(max(maxX - minX + 1, maxY - minY + 1)) / scale
     }
 
-    private func sessionItem(name: String, status: SessionStatus, pid: Int32?) -> NSMenuItem {
+    private func sessionItem(name: String, status: SessionStatus, pid: Int32?, duration: String) -> NSMenuItem {
         let appearance = statusAppearance(for: status)
-        let item = NSMenuItem(title: "\(name) — \(status.rawValue)", action: nil, keyEquivalent: "")
+        let title = duration.isEmpty ? name : "\(name)  ·  \(duration)"
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
         if status == .busy {
             item.image = busySpinnerImage(color: appearance.color, pointSize: 13)
@@ -542,6 +564,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         bubble.stopPulsing()
+        render(currentState, forceMenuRefresh: true)
     }
 
     private func displayName(for dir: String) -> String {

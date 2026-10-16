@@ -126,13 +126,14 @@ class SessionMonitor {
             }
 
             let updated = (time["updated"] as? NSNumber)?.doubleValue ?? 0
+            let created = (time["created"] as? NSNumber)?.doubleValue ?? 0
             let recent = now - updated <= Self.recentWindow * 1000
             guard isWaiting || isBusy || recent else { continue }
 
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
             let canonical = Self.canonicalPath(dir)
             guard attachedDirs.contains(canonical) else { continue }
-            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: clientPIDs[canonical]))
+            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: clientPIDs[canonical], startedAt: created))
         }
 
         publish(sessions: sessions)

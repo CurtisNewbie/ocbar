@@ -9,6 +9,16 @@ struct SessionInfo: Equatable {
     var status: SessionStatus
     var projectDir: String
     var clientPID: Int32? = nil
+    var startedAt: TimeInterval = 0
+}
+
+func formatDurationLabel(startedAtMS: TimeInterval, nowMS: TimeInterval) -> String {
+    guard startedAtMS > 0 else { return "" }
+    let minutes = max(0, Int((nowMS - startedAtMS) / 60_000))
+    let h = minutes / 60
+    let m = minutes % 60
+    if h > 0 { return m > 0 ? "\(h)h\(m)m" : "\(h)h" }
+    return "\(m)m"
 }
 
 enum AggregateStatus {
