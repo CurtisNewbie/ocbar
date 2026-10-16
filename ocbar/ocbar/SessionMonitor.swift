@@ -12,6 +12,7 @@ class SessionMonitor {
     private(set) var state = AppState()
     private var service: ServiceEndpoint?
     private var previousStatus: [String: SessionStatus] = [:]
+    private var previousDir: [String: String] = [:]
     private var attachedDirs: Set<String> = []
     private var clientPIDs: [String: Int32] = [:]
     private var scanTimer: Timer?
@@ -195,12 +196,15 @@ class SessionMonitor {
     private func publish(sessions: [SessionInfo]) {
         let visibleIDs = Set(sessions.map(\.id))
         for id in Set(previousStatus.keys).subtracting(visibleIDs) {
+            if let dir = previousDir.removeValue(forKey: id) {
+                onDismiss?(dir)
+            }
             previousStatus.removeValue(forKey: id)
         }
 
         for session in sessions {
             let prev = previousStatus[session.id] ?? .idle
-            if prev == .waiting && session.status != .waiting {
+            if (prev == .waiting && session.status != .waiting) || (prev == .idle && session.status == .busy) {
                 onDismiss?(session.projectDir)
             }
             if prev != .waiting && session.status == .waiting {
@@ -212,6 +216,7 @@ class SessionMonitor {
                 onTransition?(.idle, session.projectDir, session.clientPID)
             }
             previousStatus[session.id] = session.status
+            previousDir[session.id] = session.projectDir
         }
 
         let sorted = sessions.sorted { lhs, rhs in
