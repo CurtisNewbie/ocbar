@@ -18,6 +18,7 @@ class SessionMonitor {
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
     var onTransition: ((SessionStatus, String, Int32?) -> Void)?
+    var onDismiss: ((String) -> Void)?
 
     /// A root session is shown while its work is active/waiting or its last
     /// update is newer than this window.
@@ -199,6 +200,9 @@ class SessionMonitor {
 
         for session in sessions {
             let prev = previousStatus[session.id] ?? .idle
+            if prev == .waiting && session.status != .waiting {
+                onDismiss?(session.projectDir)
+            }
             if prev != .waiting && session.status == .waiting {
                 sendWaitingNotification(projectDir: session.projectDir)
                 onTransition?(.waiting, session.projectDir, session.clientPID)

@@ -37,11 +37,14 @@ class StatusBubble {
     private var closeButtons: [PanelKey: CloseButton] = [:]
     private var dismissWork: DispatchWorkItem?
     private let bounceClearance: CGFloat = 6
+    /// Title of the project currently displayed, or nil when dismissed.
+    private(set) var currentTitle: String?
     /// Invoked on bubble click, before the bubble dismisses.
     private var onClick: (@MainActor () -> Void)?
 
     func show(anchor: NSView?, title: String, body: String, color: NSColor, symbol: String, background: NSColor, positions: [BubblePosition], seconds: TimeInterval, onClick: (@MainActor () -> Void)? = nil) {
         dismissWork?.cancel()
+        currentTitle = title
         // Panels are reused across shows, so refresh the click handler each time.
         self.onClick = onClick
 
@@ -159,6 +162,13 @@ class StatusBubble {
         for panel in panels.values {
             panel.contentView?.layer?.removeAnimation(forKey: "bubblePulse")
         }
+    }
+
+    /// Immediately dismiss the card if it is currently showing `title`.
+    func dismiss(ifShowing title: String) {
+        guard currentTitle == title else { return }
+        currentTitle = nil
+        dismissNow()
     }
 
     private func dismissAll() {

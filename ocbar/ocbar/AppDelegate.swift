@@ -36,6 +36,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.onTransition = { [weak self] status, dir, pid in
             self?.showBubble(status: status, projectDir: dir, pid: pid)
         }
+        monitor.onDismiss = { [weak self] dir in
+            self?.dismissBubble(projectDir: dir)
+        }
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         monitor.start()
@@ -549,6 +552,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
             self?.monitor.focusSession(pid: pid)
         }
+    }
+
+    private func dismissBubble(projectDir: String) {
+        bubble.dismiss(ifShowing: displayName(for: projectDir))
     }
 
     private func bounceIcon() {
