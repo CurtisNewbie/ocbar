@@ -62,7 +62,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let nowMS = Date().timeIntervalSince1970 * 1000
             for s in sessions {
                 let item = sessionItem(name: sessionName(for: s), status: s.status, pid: s.clientPID,
-                                       duration: showSessionTime ? formatDurationLabel(startedAtMS: s.startedAt, nowMS: nowMS) : "")
+                                       duration: showSessionTime ? durationLabel(for: s, nowMS: nowMS) : "")
                 if s.status == .busy { busyMenuItems.append(item) }
                 menu.addItem(item)
             }
@@ -394,9 +394,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func sessionName(for session: SessionInfo) -> String {
         if !session.projectDir.isEmpty && session.projectDir != "/" {
-            return URL(fileURLWithPath: session.projectDir).lastPathComponent
+            let name = URL(fileURLWithPath: session.projectDir).lastPathComponent
+            return session.sessionCount > 1 ? "\(name) ×\(session.sessionCount)" : name
         }
         return session.id.isEmpty ? "session" : String(session.id.suffix(6))
+    }
+
+    /// Run times for every session collapsed into a row, newest first,
+    /// joined as "2m / 1h". Falls back to the row's own start.
+    private func durationLabel(for session: SessionInfo, nowMS: TimeInterval) -> String {
+        var starts = session.extraStartedAts.filter { $0 > 0 }
+        if starts.isEmpty { starts = [session.startedAt] }
+        let labels = Set(starts).sorted(by: >).map { formatDurationLabel(startedAtMS: $0, nowMS: nowMS) }
+        let nonEmpty = labels.filter { !$0.isEmpty }
+        return nonEmpty.isEmpty ? "" : nonEmpty.joined(separator: " / ")
     }
 
     private func statusAppearance(for status: SessionStatus) -> (symbol: String, color: NSColor) {

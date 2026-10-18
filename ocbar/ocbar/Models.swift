@@ -10,6 +10,11 @@ struct SessionInfo: Equatable {
     var projectDir: String
     var clientPID: Int32? = nil
     var startedAt: TimeInterval = 0
+    /// Number of root sessions collapsed into this row (same project directory).
+    var sessionCount: Int = 1
+    /// Start times of every root collapsed into this row (same directory),
+    /// used to render each session's run time.
+    var extraStartedAts: [TimeInterval] = []
 }
 
 func formatDurationLabel(startedAtMS: TimeInterval, nowMS: TimeInterval) -> String {
