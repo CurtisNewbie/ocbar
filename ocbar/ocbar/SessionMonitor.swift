@@ -21,9 +21,9 @@ class SessionMonitor {
     var onTransition: ((SessionStatus, String, Int32?) -> Void)?
     var onDismiss: ((String) -> Void)?
 
-    /// A root session is shown while its work is active/waiting or its last
-    /// update is newer than this window.
-    private static let recentWindow: TimeInterval = 600
+    /// A root session is shown while its work is active/waiting or the later
+    /// of its last view and last activity is newer than this window.
+    private static let recentWindow: TimeInterval = 900
 
     init(onStateChange: @escaping (AppState) -> Void) {
         self.onStateChange = onStateChange
@@ -111,6 +111,9 @@ class SessionMonitor {
                   let time = s["time"] as? [String: Any],
                   time["archived"] == nil else { continue }
 
+            // A session no client has ever viewed is never shown.
+            guard let viewed = (time["viewed"] as? NSNumber)?.doubleValue, viewed > 0 else { continue }
+
             let descendants = descendantIDs(of: id, children: children)
             let isWaiting = !descendants.isDisjoint(with: waiting)
             let isBusy = !descendants.isDisjoint(with: active)
@@ -129,13 +132,28 @@ class SessionMonitor {
 
             let updated = (time["updated"] as? NSNumber)?.doubleValue ?? 0
             let created = (time["created"] as? NSNumber)?.doubleValue ?? 0
-            let recent = now - updated <= Self.recentWindow * 1000
-            guard isWaiting || isBusy || recent else { continue }
+            let lastSeen = max(viewed, updated)
+            let recentlySeen = now - lastSeen <= Self.recentWindow * 1000
+            guard isWaiting || isBusy || recentlySeen else { continue }
 
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
             let canonical = Self.canonicalPath(dir)
             guard attachedDirs.contains(canonical) else { continue }
             sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: clientPIDs[canonical], startedAt: created))
+        }
+
+        // A revert/fork leaves the original session behind as a separate root.
+        // Hide a root while a visible session was forked from it, so one
+        // project does not show two identical rows.
+        let visibleIDs = Set(sessions.map(\.id))
+        let supersededIDs = Set(sessionList.compactMap { s -> String? in
+            guard let id = s["id"] as? String,
+                  visibleIDs.contains(id),
+                  let source = (s["fork"] as? [String: Any])?["sessionID"] as? String else { return nil }
+            return source
+        })
+        if !supersededIDs.isEmpty {
+            sessions.removeAll { supersededIDs.contains($0.id) }
         }
 
         publish(sessions: sessions)
