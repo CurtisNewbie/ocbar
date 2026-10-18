@@ -9,17 +9,13 @@ struct SessionInfo: Equatable {
     var status: SessionStatus
     var projectDir: String
     var clientPID: Int32? = nil
-    var startedAt: TimeInterval = 0
-    /// Number of root sessions collapsed into this row (same project directory).
-    var sessionCount: Int = 1
-    /// Start times of every root collapsed into this row (same directory),
-    /// used to render each session's run time.
-    var extraStartedAts: [TimeInterval] = []
+    /// Last activity timestamp in milliseconds.
+    var updatedAt: TimeInterval = 0
 }
 
-func formatDurationLabel(startedAtMS: TimeInterval, nowMS: TimeInterval) -> String {
-    guard startedAtMS > 0 else { return "" }
-    let minutes = max(0, Int((nowMS - startedAtMS) / 60_000))
+func formatDurationLabel(sinceMS: TimeInterval, nowMS: TimeInterval) -> String {
+    guard sinceMS > 0 else { return "" }
+    let minutes = max(0, Int((nowMS - sinceMS) / 60_000))
     let h = minutes / 60
     let m = minutes % 60
     if h > 0 { return m > 0 ? "\(h)h\(m)m" : "\(h)h" }

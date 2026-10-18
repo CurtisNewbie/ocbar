@@ -16,7 +16,7 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 - Red — at least one session errored
 - Gray — no OpenCode running
 
-**Click** the icon to see each session by project name and status.
+**Click** the icon to see each session by project name and status. Menu → "Show session time" adds each session's time since its last activity.
 
 **Notification** fires when any session transitions from busy → idle.
 
@@ -30,7 +30,14 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 - Every 0.5s: `GET /api/session/active` for busy sessions and `GET /api/session?limit=100&order=desc` for the session list and project directory
 - `GET /api/form` and `GET /api/permission/request`, scoped by `location[directory]=<dir>`, for pending user input. Only directories with active or recently active sessions are checked
 - A session is shown only while a live `opencode` client (TUI or CLI) is attached in its directory — client-less orphaned sessions are ignored
-- Only root sessions (top-level sessions you interact with, not subagent children) that are active/waiting or updated within the last 10 minutes are shown, labeled by project folder name
+- Only root sessions (top-level sessions you interact with, not subagent children) are shown, labeled by project folder name. When several roots share a directory, only the most recently active one is shown, so the row's status and time describe the same session
+- A session is listed while its own or a descendant's work is busy/waiting. Once a client has viewed it, it stays listed until 15 minutes after the later of its last view and its last activity. Unviewed sessions (for example a headless `opencode run`) are therefore only listed while they are busy or waiting
+
+## Limitations
+
+- **One row per project directory.** Several roots can share a directory (for example a TUI session plus a headless `opencode run`); only the most recently active one is represented, so a session that is waiting while another sibling is newer stays hidden behind that sibling's status.
+- **Focus is per directory, not per session.** OpenCode v2 exposes no client↔session mapping in its HTTP API, so ocbar only knows which directory has an attached `opencode` client. Clicking a row (or its bubble) focuses the tmux pane of the first client found in that directory. If two sessions in the same directory are open in different terminals, ocbar cannot tell which terminal hosts the row's session.
+- **Bubbles and notifications are keyed by project.** One popup per project directory, even when several sessions in it change state.
 
 ## Requirements
 

@@ -132,7 +132,6 @@ class SessionMonitor {
             }
 
             let updated = (time["updated"] as? NSNumber)?.doubleValue ?? 0
-            let created = (time["created"] as? NSNumber)?.doubleValue ?? 0
             let lastSeen = max(viewed ?? 0, updated)
             let recentlySeen = now - lastSeen <= Self.recentWindow * 1000
             guard isWaiting || isBusy || ((viewed ?? 0) > 0 && recentlySeen) else { continue }
@@ -140,7 +139,7 @@ class SessionMonitor {
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
             let canonical = Self.canonicalPath(dir)
             guard attachedDirs.contains(canonical) else { continue }
-            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: clientPIDs[canonical], startedAt: created))
+            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: clientPIDs[canonical], updatedAt: updated))
         }
 
         // A revert/fork leaves the original session behind as a separate root.
@@ -158,47 +157,22 @@ class SessionMonitor {
         }
 
         // Several roots can share a directory (a TUI session plus a headless
-        // `opencode run`). Show one row per directory.
-        var merged: [SessionInfo] = []
-        var indexByDir: [String: Int] = [:]
-        var representativeStartedAt: [TimeInterval] = []
+        // `opencode run`). Show only the most recently active session there, so
+        // the row's status and displayed time always describe the same session.
+        var latestByDir: [String: SessionInfo] = [:]
+        var dirOrder: [String] = []
         for session in sessions {
             let key = Self.canonicalPath(session.projectDir)
-            guard let index = indexByDir[key] else {
-                indexByDir[key] = merged.count
-                var row = session
-                row.extraStartedAts = session.startedAt > 0 ? [session.startedAt] : []
-                merged.append(row)
-                representativeStartedAt.append(session.startedAt)
-                continue
+            if let existing = latestByDir[key] {
+                if session.updatedAt > existing.updatedAt {
+                    latestByDir[key] = session
+                }
+            } else {
+                latestByDir[key] = session
+                dirOrder.append(key)
             }
-            var row = merged[index]
-            row.sessionCount += 1
-            if session.startedAt > 0 { row.extraStartedAts.append(session.startedAt) }
-            let incomingPriority = Self.statusPriority(session.status)
-            let currentPriority = Self.statusPriority(row.status)
-            if incomingPriority < currentPriority {
-                // Higher priority owns both the glyph and the displayed time.
-                row.status = session.status
-                row.startedAt = session.startedAt
-            } else if incomingPriority == currentPriority {
-                row.startedAt = min(row.startedAt, session.startedAt)
-            }
-            if session.startedAt < representativeStartedAt[index] {
-                // `id` stays the earliest-started root for stable previousStatus
-                // tracking; status/startedAt continue to follow the status owner.
-                representativeStartedAt[index] = session.startedAt
-                row = SessionInfo(id: session.id,
-                                  status: row.status,
-                                  projectDir: row.projectDir,
-                                  clientPID: row.clientPID,
-                                  startedAt: row.startedAt,
-                                  sessionCount: row.sessionCount,
-                                  extraStartedAts: row.extraStartedAts)
-            }
-            merged[index] = row
         }
-        sessions = merged
+        sessions = dirOrder.compactMap { latestByDir[$0] }
 
         publish(sessions: sessions)
     }
@@ -328,16 +302,6 @@ class SessionMonitor {
     private nonisolated static func canonicalPath(_ path: String) -> String {
         guard !path.isEmpty else { return "" }
         return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-    }
-
-    /// Lower is more urgent; used to pick the status of a merged row.
-    private nonisolated static func statusPriority(_ status: SessionStatus) -> Int {
-        switch status {
-        case .waiting: return 0
-        case .busy: return 1
-        case .error: return 2
-        case .idle: return 3
-        }
     }
 
     /// Directories with an attached `opencode` client, excluding the shared
