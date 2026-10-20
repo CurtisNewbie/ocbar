@@ -13,8 +13,6 @@ class SessionMonitor {
     private var service: ServiceEndpoint?
     private var previousStatus: [String: SessionStatus] = [:]
     private var previousDir: [String: String] = [:]
-    private var attachedDirs: Set<String> = []
-    private var dirToPID: [String: Int32] = [:]
     private var sessionIDToPID: [String: Int32] = [:]
     private var scanTimer: Timer?
     private var pollTimer: Timer?
@@ -46,8 +44,6 @@ class SessionMonitor {
     private func scan() async {
         guard let endpoint = readService(), await isReady(endpoint) else {
             service = nil
-            attachedDirs = []
-            dirToPID = [:]
             sessionIDToPID = [:]
             await poll()
             return
@@ -57,9 +53,7 @@ class SessionMonitor {
         let clients = await Task.detached {
             SessionMonitor.attachedClients(servicePID: pid)
         }.value
-        attachedDirs = Set(clients.dirToPID.keys)
-        dirToPID = clients.dirToPID
-        sessionIDToPID = clients.sessionIDToPID
+        sessionIDToPID = clients
         await poll()
     }
 
@@ -139,10 +133,8 @@ class SessionMonitor {
             let recentlySeen = now - lastSeen <= Self.recentWindow * 1000
             guard isWaiting || isBusy || ((viewed ?? 0) > 0 && recentlySeen) else { continue }
 
+            guard let pid = sessionIDToPID[id] else { continue }
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
-            let canonical = Self.canonicalPath(dir)
-            guard sessionIDToPID[id] != nil || attachedDirs.contains(canonical) else { continue }
-            let pid = sessionIDToPID[id] ?? dirToPID[canonical]
             sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid, sessionTitle: s["title"] as? String, updatedAt: updated))
         }
 
@@ -285,18 +277,11 @@ class SessionMonitor {
         return try? JSONSerialization.jsonObject(with: data)
     }
 
-    private nonisolated static func canonicalPath(_ path: String) -> String {
-        guard !path.isEmpty else { return "" }
-        return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-    }
-
-    /// Directories with an attached `opencode` client, excluding the shared
-    /// `opencode serve --service` process. Returns canonicalized dir -> client pid
-    /// (first pid wins per dir) plus an exact session id -> client pid binding
-    /// parsed from the client's argv (`--session <id>` / `-s <id>`). The dir map
-    /// drives visibility; the session map lets a bubble click focus the exact pane.
-    private nonisolated static func attachedClients(servicePID: Int32) -> (dirToPID: [String: Int32], sessionIDToPID: [String: Int32]) {
-        var dirToPID: [String: Int32] = [:]
+    /// Map each running `opencode` client (excluding the shared
+    /// `opencode serve --service` process) to the exact session id parsed from
+    /// its argv (`--session <id>` / `-s <id>`), i.e. session id -> client pid.
+    /// The first pid wins per session id.
+    private nonisolated static func attachedClients(servicePID: Int32) -> [String: Int32] {
         var sessionIDToPID: [String: Int32] = [:]
 
         var argvByPID: [Int32: String] = [:]
@@ -315,21 +300,13 @@ class SessionMonitor {
             guard (comm as NSString).lastPathComponent == "opencode" else { continue }
             guard pid != servicePID else { continue }
 
-            let dir = cwd(pid: pid)
-            if !dir.isEmpty {
-                let canonical = canonicalPath(dir)
-                if dirToPID[canonical] == nil {
-                    dirToPID[canonical] = pid
-                }
-            }
-
             if let argv = argvByPID[pid],
                let sessionID = sessionID(fromArgv: argv),
                sessionIDToPID[sessionID] == nil {
                 sessionIDToPID[sessionID] = pid
             }
         }
-        return (dirToPID, sessionIDToPID)
+        return sessionIDToPID
     }
 
     /// Extract the session id passed on the command line, accepting
@@ -354,15 +331,6 @@ class SessionMonitor {
             i += 1
         }
         return nil
-    }
-
-    private nonisolated static func cwd(pid: Int32) -> String {
-        let output = runShell("lsof -p \(pid) -a -d cwd -Fn 2>/dev/null")
-        for line in output.components(separatedBy: "\n") where line.hasPrefix("n") {
-            let path = String(line.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !path.isEmpty { return path }
-        }
-        return ""
     }
 
     private nonisolated static func runShell(_ cmd: String) -> String {
