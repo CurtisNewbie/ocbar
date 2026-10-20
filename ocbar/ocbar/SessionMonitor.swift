@@ -19,7 +19,7 @@ class SessionMonitor {
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
-    var onTransition: ((SessionStatus, String, Int32?) -> Void)?
+    var onTransition: ((SessionStatus, String, Int32?, String?) -> Void)?
     var onDismiss: ((String) -> Void)?
 
     /// A root session is shown while its work is active/waiting, or if it has
@@ -231,11 +231,11 @@ class SessionMonitor {
             }
             if prev != .waiting && session.status == .waiting {
                 sendWaitingNotification(projectDir: session.projectDir)
-                onTransition?(.waiting, session.projectDir, session.clientPID)
+                onTransition?(.waiting, session.projectDir, session.clientPID, session.sessionTitle)
             }
             if prev == .busy && session.status == .idle {
                 sendIdleNotification(projectDir: session.projectDir)
-                onTransition?(.idle, session.projectDir, session.clientPID)
+                onTransition?(.idle, session.projectDir, session.clientPID, session.sessionTitle)
             }
             previousStatus[session.id] = session.status
             previousDir[session.id] = session.projectDir

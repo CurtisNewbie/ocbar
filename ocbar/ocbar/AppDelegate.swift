@@ -34,8 +34,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.render(state)
         }
         bubble = StatusBubble()
-        monitor.onTransition = { [weak self] status, dir, pid in
-            self?.showBubble(status: status, projectDir: dir, pid: pid)
+        monitor.onTransition = { [weak self] status, dir, pid, title in
+            self?.showBubble(status: status, projectDir: dir, pid: pid, title: title)
         }
         monitor.onDismiss = { [weak self] dir in
             self?.dismissBubble(projectDir: dir)
@@ -348,7 +348,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
         var busyAttachments: [NSTextAttachment] = []
 
-        let names = disambiguatedNames(for: sessions)
         for (index, session) in sessions.enumerated() {
             if index > 0 {
                 title.append(NSAttributedString(string: "  ·  ", attributes: attributes))
@@ -363,7 +362,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 title.append(NSAttributedString(attachment: attachment))
                 if session.status == .busy { busyAttachments.append(attachment) }
             }
-            title.append(NSAttributedString(string: " \(names[session.id] ?? sessionName(for: session))", attributes: attributes))
+            title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
         }
 
         return (title, busyAttachments)
@@ -376,7 +375,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let active = sessions.filter { $0.status != .idle }
         let idle = sessions.filter { $0.status == .idle }
-        let names = disambiguatedNames(for: active)
 
         for session in active {
             if title.length > 0 {
@@ -392,7 +390,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 title.append(NSAttributedString(attachment: attachment))
                 if session.status == .busy { busyAttachments.append(attachment) }
             }
-            title.append(NSAttributedString(string: " \(names[session.id] ?? sessionName(for: session))", attributes: attributes))
+            title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
         }
 
         if !idle.isEmpty {
@@ -590,23 +588,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.focusSession(pid: pid)
     }
 
-    private func showBubble(status: SessionStatus, projectDir: String, pid: Int32?) {
+    private func showBubble(status: SessionStatus, projectDir: String, pid: Int32?, title: String?) {
         let name = displayName(for: projectDir)
-        let body: String
+        let statusWord: String
         let color: NSColor
         let symbol: String
         switch status {
         case .idle:
-            body = "Ready"
+            statusWord = "Ready"
             color = .systemGreen
             symbol = "checkmark.circle.fill"
         case .waiting:
-            body = "Needs input"
+            statusWord = "Needs input"
             color = .systemBlue
             symbol = "questionmark.circle.fill"
         default:
             return
         }
+        let trimmedTitle = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = (showSessionTitles && !trimmedTitle.isEmpty) ? trimmedTitle : statusWord
         bounceIcon()
         bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
             self?.monitor.focusSession(pid: pid)

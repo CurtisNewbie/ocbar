@@ -8,7 +8,7 @@ macOS menubar app that monitors [OpenCode](https://opencode.ai) sessions across 
 
 Shows a live status indicator in your menubar so you know when agents finish without watching the terminal.
 
-**Menubar label:** For one through the configured maximum of 1–10 sessions (default 4), each session shows its colored status icon followed by its project/session name. For zero or sessions above the configured maximum, the existing aggregate label is used, such as `● 2 busy · 1 idle`.
+**Menubar label:** For one through the configured maximum of 1–10 sessions (default 4), each session shows its colored status icon followed by its project folder name only — never the session title. Sessions that share a folder name render identically (no disambiguation suffix). For zero or sessions above the configured maximum, the existing aggregate label is used, such as `● 2 busy · 1 idle`.
 
 **Icon color:**
 - Orange — all sessions busy (agent working)
@@ -16,11 +16,11 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 - Red — at least one session errored
 - Gray — no OpenCode running
 
-**Click** the icon to see each session by project name and status. Menu → "Show session time" adds each session's time since its last activity. Menu → "Show session titles" chooses whether rows that share a folder are told apart by the session title or by a short id suffix.
+**Click** the icon to see each session by project name and status. Menu → "Show session time" adds each session's time since its last activity. Menu → "Show session titles" chooses whether menu rows that share a folder are told apart by the session title or by a short id suffix. The same toggle controls whether the bubble's subtitle line shows the session title (falling back to the status word). The menubar itself never shows session titles.
 
 **Notification** fires when any session transitions from busy → idle.
 
-**Bubble** — when a session transitions busy → idle or → waiting, a speech-bubble pops up below the menubar icon with a tail pointing at it: "`project` ready" (green checkmark) or "`project` needs input" (blue question mark). It pops in, holds 10 seconds, then fades out. Click the bubble to focus that session's tmux pane and dismiss it; click the small × at its top-right to dismiss without focusing. The menubar icon bounces at the same time to draw the eye. On additional screens (no visible icon there), the bubble position is configurable via menu → "Bubble position": top center, top left, top right, bottom left, or bottom right.
+**Bubble** — when a session transitions busy → idle or → waiting, a speech-bubble pops up below the menubar icon with a tail pointing at it: the title line shows the project folder name and the subtitle line shows the session title when "Show session titles" is on and the session has a title, otherwise it shows the status word ("Ready" with a green checkmark or "Needs input" with a blue question mark). It pops in, holds 10 seconds, then fades out. Click the bubble to focus that session's tmux pane and dismiss it; click the small × at its top-right to dismiss without focusing. The menubar icon bounces at the same time to draw the eye. On additional screens (no visible icon there), the bubble position is configurable via menu → "Bubble position": top center, top left, top right, bottom left, or bottom right.
 
 ## How it works
 
@@ -30,7 +30,7 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 - Every 0.5s: `GET /api/session/active` for busy sessions and `GET /api/session?limit=100&order=desc` for the session list and project directory
 - `GET /api/form` and `GET /api/permission/request`, scoped by `location[directory]=<dir>`, for pending user input. Only directories with active or recently active sessions are checked
 - A session is shown only while a live `opencode` client (TUI or CLI) is attached in its directory — client-less orphaned sessions are ignored
-- Only root sessions (top-level sessions you interact with, not subagent children) are shown, labeled by project folder name. Several roots can share a directory; each is shown as its own row, and rows that share a folder are told apart by the session title (or a short id suffix when titles are off or the session has no title)
+- Only root sessions (top-level sessions you interact with, not subagent children) are shown, labeled by project folder name. The menubar shows folder names only, so duplicate folders render identically; in the dropdown menu, several roots can share a directory, each shown as its own row, and rows that share a folder are told apart by the session title (or a short id suffix when titles are off or the session has no title)
 - When a client is started with an explicit session id (`opencode --session <id>`, as the `oc` / `oct` / `occ` shell helpers do), ocbar reads that id from the client's command line (`ps` argv) and binds the row to the exact client pid; clients started without one fall back to the first attached client in the directory
 - A session is listed while its own or a descendant's work is busy/waiting. Once a client has viewed it, it stays listed until 15 minutes after the later of its last view and its last activity. Unviewed sessions (for example a headless `opencode run`) are therefore only listed while they are busy or waiting
 
