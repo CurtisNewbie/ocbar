@@ -15,6 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var currentButtonTitle: NSAttributedString?
     private let projectsShownKey = "ocbar.projectsShown"
     private let showSessionTimeKey = "ocbar.showSessionTime"
+    private let showSessionTitlesKey = "ocbar.showSessionTitles"
     private let defaultProjectsShown = 4
     private let bubblePositionsKey = "ocbar.bubblePositions"
     private let bubbleSecondsKey = "ocbar.bubbleSeconds"
@@ -60,8 +61,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(menuLabel("No OpenCode sessions"))
         } else {
             let nowMS = Date().timeIntervalSince1970 * 1000
+            let names = disambiguatedNames(for: sessions)
             for s in sessions {
-                let item = sessionItem(name: sessionName(for: s), status: s.status, pid: s.clientPID,
+                let item = sessionItem(name: names[s.id] ?? sessionName(for: s), status: s.status, pid: s.clientPID,
                                        duration: showSessionTime ? formatDurationLabel(sinceMS: s.updatedAt, nowMS: nowMS) : "")
                 if s.status == .busy { busyMenuItems.append(item) }
                 menu.addItem(item)
@@ -73,6 +75,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(bubbleSecondsMenu())
         menu.addItem(bubbleColorMenu())
         menu.addItem(showSessionTimeMenu())
+        menu.addItem(showSessionTitlesMenu())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -167,6 +170,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showSessionTimeToggled(_ sender: NSMenuItem) {
         UserDefaults.standard.set(!showSessionTime, forKey: showSessionTimeKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    private var showSessionTitles: Bool {
+        guard let stored = UserDefaults.standard.object(forKey: showSessionTitlesKey) as? Bool else { return true }
+        return stored
+    }
+
+    private func showSessionTitlesMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Show session titles", action: #selector(showSessionTitlesToggled(_:)), keyEquivalent: "")
+        item.target = self
+        item.state = showSessionTitles ? .on : .off
+        return item
+    }
+
+    @objc private func showSessionTitlesToggled(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(!showSessionTitles, forKey: showSessionTitlesKey)
         render(currentState, forceMenuRefresh: true)
     }
 
@@ -328,6 +348,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
         var busyAttachments: [NSTextAttachment] = []
 
+        let names = disambiguatedNames(for: sessions)
         for (index, session) in sessions.enumerated() {
             if index > 0 {
                 title.append(NSAttributedString(string: "  ·  ", attributes: attributes))
@@ -342,7 +363,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 title.append(NSAttributedString(attachment: attachment))
                 if session.status == .busy { busyAttachments.append(attachment) }
             }
-            title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
+            title.append(NSAttributedString(string: " \(names[session.id] ?? sessionName(for: session))", attributes: attributes))
         }
 
         return (title, busyAttachments)
@@ -355,6 +376,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let active = sessions.filter { $0.status != .idle }
         let idle = sessions.filter { $0.status == .idle }
+        let names = disambiguatedNames(for: active)
 
         for session in active {
             if title.length > 0 {
@@ -370,7 +392,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 title.append(NSAttributedString(attachment: attachment))
                 if session.status == .busy { busyAttachments.append(attachment) }
             }
-            title.append(NSAttributedString(string: " \(sessionName(for: session))", attributes: attributes))
+            title.append(NSAttributedString(string: " \(names[session.id] ?? sessionName(for: session))", attributes: attributes))
         }
 
         if !idle.isEmpty {
@@ -397,6 +419,43 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return URL(fileURLWithPath: session.projectDir).lastPathComponent
         }
         return session.id.isEmpty ? "session" : String(session.id.suffix(6))
+    }
+
+    // Several live sessions can share one project folder, which would otherwise
+    // render as identical rows. Only names that actually collide get a short
+    // suffix — the session's server title when it has one, otherwise the tail of
+    // its id — so a unique folder name stays clean.
+    private func disambiguatedNames(for sessions: [SessionInfo]) -> [String: String] {
+        var counts: [String: Int] = [:]
+        for session in sessions {
+            counts[sessionName(for: session), default: 0] += 1
+        }
+        var names: [String: String] = [:]
+        for session in sessions {
+            let base = sessionName(for: session)
+            if (counts[base] ?? 0) > 1 {
+                names[session.id] = "\(base) (\(sessionDisambiguator(for: session)))"
+            } else {
+                names[session.id] = base
+            }
+        }
+        return names
+    }
+
+    private func sessionDisambiguator(for session: SessionInfo) -> String {
+        if showSessionTitles {
+            let title = (session.sessionTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty {
+                return truncated(title, limit: 24)
+            }
+        }
+        let tail = session.id.suffix(6)
+        return tail.isEmpty ? "session" : String(tail)
+    }
+
+    private func truncated(_ text: String, limit: Int) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
     }
 
     private func statusAppearance(for status: SessionStatus) -> (symbol: String, color: NSColor) {

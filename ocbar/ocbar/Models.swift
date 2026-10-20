@@ -9,6 +9,8 @@ struct SessionInfo: Equatable {
     var status: SessionStatus
     var projectDir: String
     var clientPID: Int32? = nil
+    /// Optional display title from the session JSON `title` field.
+    var sessionTitle: String? = nil
     /// Last activity timestamp in milliseconds.
     var updatedAt: TimeInterval = 0
 }

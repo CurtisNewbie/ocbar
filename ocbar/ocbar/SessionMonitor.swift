@@ -14,7 +14,8 @@ class SessionMonitor {
     private var previousStatus: [String: SessionStatus] = [:]
     private var previousDir: [String: String] = [:]
     private var attachedDirs: Set<String> = []
-    private var clientPIDs: [String: Int32] = [:]
+    private var dirToPID: [String: Int32] = [:]
+    private var sessionIDToPID: [String: Int32] = [:]
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
@@ -46,7 +47,8 @@ class SessionMonitor {
         guard let endpoint = readService(), await isReady(endpoint) else {
             service = nil
             attachedDirs = []
-            clientPIDs = [:]
+            dirToPID = [:]
+            sessionIDToPID = [:]
             await poll()
             return
         }
@@ -55,8 +57,9 @@ class SessionMonitor {
         let clients = await Task.detached {
             SessionMonitor.attachedClients(servicePID: pid)
         }.value
-        attachedDirs = Set(clients.keys)
-        clientPIDs = clients
+        attachedDirs = Set(clients.dirToPID.keys)
+        dirToPID = clients.dirToPID
+        sessionIDToPID = clients.sessionIDToPID
         await poll()
     }
 
@@ -138,8 +141,9 @@ class SessionMonitor {
 
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
             let canonical = Self.canonicalPath(dir)
-            guard attachedDirs.contains(canonical) else { continue }
-            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: clientPIDs[canonical], updatedAt: updated))
+            guard sessionIDToPID[id] != nil || attachedDirs.contains(canonical) else { continue }
+            let pid = sessionIDToPID[id] ?? dirToPID[canonical]
+            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid, sessionTitle: s["title"] as? String, updatedAt: updated))
         }
 
         // A revert/fork leaves the original session behind as a separate root.
@@ -155,24 +159,6 @@ class SessionMonitor {
         if !supersededIDs.isEmpty {
             sessions.removeAll { supersededIDs.contains($0.id) }
         }
-
-        // Several roots can share a directory (a TUI session plus a headless
-        // `opencode run`). Show only the most recently active session there, so
-        // the row's status and displayed time always describe the same session.
-        var latestByDir: [String: SessionInfo] = [:]
-        var dirOrder: [String] = []
-        for session in sessions {
-            let key = Self.canonicalPath(session.projectDir)
-            if let existing = latestByDir[key] {
-                if session.updatedAt > existing.updatedAt {
-                    latestByDir[key] = session
-                }
-            } else {
-                latestByDir[key] = session
-                dirOrder.append(key)
-            }
-        }
-        sessions = dirOrder.compactMap { latestByDir[$0] }
 
         publish(sessions: sessions)
     }
@@ -305,10 +291,22 @@ class SessionMonitor {
     }
 
     /// Directories with an attached `opencode` client, excluding the shared
-    /// `opencode serve --service` process. Maps canonicalized dir -> client pid
-    /// (first pid wins per dir), so a bubble click can focus the right tmux pane.
-    private nonisolated static func attachedClients(servicePID: Int32) -> [String: Int32] {
-        var clients: [String: Int32] = [:]
+    /// `opencode serve --service` process. Returns canonicalized dir -> client pid
+    /// (first pid wins per dir) plus an exact session id -> client pid binding
+    /// parsed from the client's argv (`--session <id>` / `-s <id>`). The dir map
+    /// drives visibility; the session map lets a bubble click focus the exact pane.
+    private nonisolated static func attachedClients(servicePID: Int32) -> (dirToPID: [String: Int32], sessionIDToPID: [String: Int32]) {
+        var dirToPID: [String: Int32] = [:]
+        var sessionIDToPID: [String: Int32] = [:]
+
+        var argvByPID: [Int32: String] = [:]
+        let argsOutput = runShell("ps -Ao pid=,args= -ww")
+        for line in argsOutput.components(separatedBy: "\n") {
+            let cols = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            guard cols.count == 2, let pid = Int32(cols[0]) else { continue }
+            argvByPID[pid] = String(cols[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
         let output = runShell("ps -Ao pid=,comm=")
         for line in output.components(separatedBy: "\n") {
             let cols = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
@@ -316,14 +314,46 @@ class SessionMonitor {
             let comm = String(cols[1]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard (comm as NSString).lastPathComponent == "opencode" else { continue }
             guard pid != servicePID else { continue }
+
             let dir = cwd(pid: pid)
-            guard !dir.isEmpty else { continue }
-            let canonical = canonicalPath(dir)
-            if clients[canonical] == nil {
-                clients[canonical] = pid
+            if !dir.isEmpty {
+                let canonical = canonicalPath(dir)
+                if dirToPID[canonical] == nil {
+                    dirToPID[canonical] = pid
+                }
+            }
+
+            if let argv = argvByPID[pid],
+               let sessionID = sessionID(fromArgv: argv),
+               sessionIDToPID[sessionID] == nil {
+                sessionIDToPID[sessionID] = pid
             }
         }
-        return clients
+        return (dirToPID, sessionIDToPID)
+    }
+
+    /// Extract the session id passed on the command line, accepting
+    /// `--session <id>`, `-s <id>`, `--session=<id>` and `-s=<id>`.
+    private nonisolated static func sessionID(fromArgv argv: String) -> String? {
+        let tokens = argv.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" })
+        var i = 0
+        while i < tokens.count {
+            let token = String(tokens[i])
+            if token == "--session" || token == "-s" {
+                if i + 1 < tokens.count {
+                    let id = String(tokens[i + 1])
+                    if id.hasPrefix("ses") { return id }
+                }
+            } else if token.hasPrefix("--session=") {
+                let id = String(token.dropFirst("--session=".count))
+                if id.hasPrefix("ses") { return id }
+            } else if token.hasPrefix("-s=") {
+                let id = String(token.dropFirst("-s=".count))
+                if id.hasPrefix("ses") { return id }
+            }
+            i += 1
+        }
+        return nil
     }
 
     private nonisolated static func cwd(pid: Int32) -> String {
