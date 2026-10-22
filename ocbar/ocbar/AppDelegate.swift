@@ -64,7 +64,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let names = disambiguatedNames(for: sessions)
             for s in sessions {
                 let item = sessionItem(name: names[s.id] ?? sessionName(for: s), status: s.status, pid: s.clientPID,
-                                       duration: showSessionTime ? formatDurationLabel(sinceMS: s.updatedAt, nowMS: nowMS) : "")
+                                       duration: showSessionTime ? formatDurationLabel(sinceMS: s.createdAt, nowMS: nowMS) : "")
                 if s.status == .busy { busyMenuItems.append(item) }
                 menu.addItem(item)
             }

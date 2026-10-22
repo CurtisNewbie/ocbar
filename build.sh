@@ -27,6 +27,11 @@ mkdir -p "$APP/Contents/Resources"
 cp "$DIR/ocbar/ocbar_bin" "$APP/Contents/MacOS/ocbar"
 cp "$SRC/Info.plist" "$APP/Contents/Info.plist"
 
+PLUGINDEST="$HOME/.config/opencode/plugins/ocbar-bridge"
+echo "Installing TUI bridge plugin to $PLUGINDEST..."
+mkdir -p "$PLUGINDEST"
+cp "$DIR/plugin/ocbar-bridge/tui.js" "$PLUGINDEST/tui.js"
+
 DEST="$HOME/Applications"
 echo "Installing to $DEST..."
 mkdir -p "$DEST"

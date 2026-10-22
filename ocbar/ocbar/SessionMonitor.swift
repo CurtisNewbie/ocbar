@@ -129,13 +129,14 @@ class SessionMonitor {
             }
 
             let updated = (time["updated"] as? NSNumber)?.doubleValue ?? 0
+            let created = (time["created"] as? NSNumber)?.doubleValue ?? 0
             let lastSeen = max(viewed ?? 0, updated)
             let recentlySeen = now - lastSeen <= Self.recentWindow * 1000
             guard isWaiting || isBusy || ((viewed ?? 0) > 0 && recentlySeen) else { continue }
 
             guard let pid = sessionIDToPID[id] else { continue }
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
-            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid, sessionTitle: s["title"] as? String, updatedAt: updated))
+            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid, sessionTitle: s["title"] as? String, createdAt: created))
         }
 
         // A revert/fork leaves the original session behind as a separate root.
@@ -278,9 +279,14 @@ class SessionMonitor {
     }
 
     /// Map each running `opencode` client (excluding the shared
-    /// `opencode serve --service` process) to the exact session id parsed from
-    /// its argv (`--session <id>` / `-s <id>`), i.e. session id -> client pid.
-    /// The first pid wins per session id.
+    /// `opencode serve --service` process) to the exact session it is driving,
+    /// i.e. session id -> client pid. The first pid wins per session id.
+    ///
+    /// The authoritative source is the binding file a Web/TUI plugin publishes
+    /// per client at `~/.local/state/ocbar/bindings/<pid>.json`, which reflects
+    /// the client's *live* route (`/clear`, `/new`, session tabs, … all change
+    /// it without touching argv). The launch-time argv id (`--session <id>` /
+    /// `-s <id>`) is only a fallback for clients with no fresh binding file.
     private nonisolated static func attachedClients(servicePID: Int32) -> [String: Int32] {
         var sessionIDToPID: [String: Int32] = [:]
 
@@ -292,6 +298,9 @@ class SessionMonitor {
             argvByPID[pid] = String(cols[1]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        let published = publishedBindings()
+
+        var clientPIDs: [Int32] = []
         let output = runShell("ps -Ao pid=,comm=")
         for line in output.components(separatedBy: "\n") {
             let cols = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
@@ -299,7 +308,21 @@ class SessionMonitor {
             let comm = String(cols[1]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard (comm as NSString).lastPathComponent == "opencode" else { continue }
             guard pid != servicePID else { continue }
+            clientPIDs.append(pid)
+        }
 
+        for pid in clientPIDs.sorted() {
+            // A fresh published binding is authoritative for this client.
+            if let binding = published[pid] {
+                if let sessionID = binding, sessionIDToPID[sessionID] == nil {
+                    sessionIDToPID[sessionID] = pid
+                }
+                // A `nil` binding means the client has no current session; do
+                // not fall back to the stale argv id in that case.
+                continue
+            }
+
+            // No fresh binding file: fall back to the launch-time argv id.
             if let argv = argvByPID[pid],
                let sessionID = sessionID(fromArgv: argv),
                sessionIDToPID[sessionID] == nil {
@@ -307,6 +330,49 @@ class SessionMonitor {
             }
         }
         return sessionIDToPID
+    }
+
+    /// Read the per-client binding files published by the Web/TUI plugin under
+    /// `~/.local/state/ocbar/bindings/<pid>.json`, each reporting the session
+    /// that client is currently driving (live route). `sessionID: null` is
+    /// meaningful: the client currently has no session.
+    ///
+    /// Missing/corrupt files are skipped silently. A file is ignored when its
+    /// pid/`updatedAt` is missing, its `updatedAt` is stale (> 15s), or its
+    /// `isRoot` is explicitly `false`. Returns `[pid: sessionID?]`.
+    private nonisolated static func publishedBindings() -> [Int32: String?] {
+        var bindings: [Int32: String?] = [:]
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/state/ocbar/bindings")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]) else { return [:] }
+
+        let nowMS = Date().timeIntervalSince1970 * 1000
+
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+
+            let pid: Int32?
+            if let jsonPID = (json["pid"] as? NSNumber)?.int32Value {
+                pid = jsonPID
+            } else if let name = Int32(file.deletingPathExtension().lastPathComponent) {
+                pid = name
+            } else {
+                pid = nil
+            }
+            guard let pid else { continue }
+
+            guard let updatedAt = (json["updatedAt"] as? NSNumber)?.doubleValue else { continue }
+            guard abs(nowMS - updatedAt) <= 15_000 else { continue }
+
+            if let isRoot = json["isRoot"] as? Bool, isRoot == false { continue }
+
+            bindings[pid] = json["sessionID"] as? String
+        }
+        return bindings
     }
 
     /// Extract the session id passed on the command line, accepting

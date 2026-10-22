@@ -11,8 +11,8 @@ struct SessionInfo: Equatable {
     var clientPID: Int32? = nil
     /// Optional display title from the session JSON `title` field.
     var sessionTitle: String? = nil
-    /// Last activity timestamp in milliseconds.
-    var updatedAt: TimeInterval = 0
+    /// Session creation timestamp in milliseconds (session JSON `time.created`).
+    var createdAt: TimeInterval = 0
 }
 
 func formatDurationLabel(sinceMS: TimeInterval, nowMS: TimeInterval) -> String {
