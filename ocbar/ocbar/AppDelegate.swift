@@ -92,13 +92,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let total = state.sessions.count
         if total == 0 {
             button.image = nil
-            if let base = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil) {
+            // No sessions: glyph only. The status item shrinks to a bare dot —
+            // the same dot-plus-name grammar the populated states use, minus a
+            // name to show. The words live in the menu ("No OpenCode sessions").
+            if let base = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "No OpenCode sessions") {
                 button.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: .secondaryLabelColor)
             }
-            button.imagePosition = .imageLeft
+            button.imagePosition = .imageOnly
             busyTitleAttachments = []
             currentButtonTitle = nil
-            button.attributedTitle = NSAttributedString(string: " No Opencode Session", attributes: attrs)
+            button.attributedTitle = NSAttributedString(string: "", attributes: attrs)
         } else if total <= projectsShown {
             button.image = nil
             let built = sessionTitle(for: state.sessions, attributes: attrs)
