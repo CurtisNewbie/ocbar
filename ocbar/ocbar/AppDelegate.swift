@@ -20,6 +20,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let bubblePositionsKey = "ocbar.bubblePositions"
     private let bubbleSecondsKey = "ocbar.bubbleSeconds"
     private let bubbleColorKey = "ocbar.bubbleColor"
+    private let alertSoundKey = "ocbar.alertSound"
     private let defaultBubbleSeconds = 10
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -74,6 +75,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(bubblePositionMenu())
         menu.addItem(bubbleSecondsMenu())
         menu.addItem(bubbleColorMenu())
+        menu.addItem(alertSoundMenu())
         menu.addItem(showSessionTimeMenu())
         menu.addItem(showSessionTitlesMenu())
         menu.addItem(.separator())
@@ -337,6 +339,77 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let all = BubbleColor.allCases
         guard all.indices.contains(sender.tag) else { return }
         UserDefaults.standard.set(all[sender.tag].rawValue, forKey: bubbleColorKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    // The alert played alongside the bubble. "System alert" uses the user's
+    // configured alert sound (NSSound.beep()); the rest are the macOS system
+    // sounds, which NSSound looks up by their capitalized name.
+    private enum AlertSound: String, CaseIterable {
+        case off
+        case system
+        case basso
+        case blow
+        case bottle
+        case frog
+        case funk
+        case glass
+        case hero
+        case morse
+        case ping
+        case pop
+        case purr
+        case sosumi
+        case submarine
+        case tink
+
+        var displayName: String {
+            switch self {
+            case .off: return "Off"
+            case .system: return "System alert"
+            default: return rawValue.capitalized
+            }
+        }
+
+        func play() {
+            switch self {
+            case .off: return
+            case .system: NSSound.beep()
+            default: NSSound(named: rawValue.capitalized)?.play()
+            }
+        }
+    }
+
+    private var alertSound: AlertSound {
+        guard let raw = UserDefaults.standard.string(forKey: alertSoundKey),
+              let sound = AlertSound(rawValue: raw) else { return .off }
+        return sound
+    }
+
+    private func alertSoundMenu() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for (index, sound) in AlertSound.allCases.enumerated() {
+            let item = NSMenuItem(title: sound.displayName, action: #selector(alertSoundSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = sound == alertSound ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Alert sound", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    @objc private func alertSoundSelected(_ sender: NSMenuItem) {
+        let all = AlertSound.allCases
+        guard all.indices.contains(sender.tag) else { return }
+        let selected = all[sender.tag]
+        UserDefaults.standard.set(selected.rawValue, forKey: alertSoundKey)
+        // Preview the pick immediately so the user hears what they chose; .off is a no-op.
+        selected.play()
         render(currentState, forceMenuRefresh: true)
     }
 
@@ -611,6 +684,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let trimmedTitle = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let body = (showSessionTitles && !trimmedTitle.isEmpty) ? trimmedTitle : statusWord
         bounceIcon()
+        alertSound.play()
         bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
             self?.monitor.focusSession(pid: pid)
         }
