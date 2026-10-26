@@ -142,6 +142,28 @@ func islandRowHeight(lines: Int) -> CGFloat {
     islandRowOneLineHeight + CGFloat(max(lines, 1) - 1) * islandRowHeightPerExtraLine
 }
 
+/// Width a label needs to draw its text **without clipping** — which is wider
+/// than `intrinsicContentSize`.
+///
+/// `intrinsicContentSize` is the bare glyph advance, but the cell that draws the
+/// label lays the text out a couple of points in from the frame's edge and then
+/// **clips at that edge**. A frame sized to the advance therefore shaves the
+/// trailing glyph: the pill's `2` lost ~1.2pt, and the row's right-aligned age
+/// loses ~0.8pt off its `m` (`5h36m` needs 38.28 in a 37.5 frame).
+/// `cellSize` is the cell's own answer for how wide it must be, and unlike the
+/// intrinsic width it does not change with the backing scale, so layout is
+/// identical on every display.
+///
+/// Every island label whose frame is derived from its own text is sized through
+/// this. Labels the layout sizes instead — the row's name, title and context,
+/// which fill the line and truncate — are not affected: when the text is too
+/// long the cell truncates *inside* its drawing rect, so the ellipsis is never
+/// shaved (measured on 441pt frames, their ink ends 10–166pt short of the edge).
+func islandLabelWidth(for label: NSTextField) -> CGFloat {
+    let unclipped = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: 1000, height: 20)).width ?? 0
+    return max(label.intrinsicContentSize.width, unclipped)
+}
+
 /// Height of a collapsed capsule on a display with no cutout, and the floor for
 /// a notched pill's height. File-level because the notched/plain decision is
 /// made in a static metrics helper as well as in the panel.
@@ -1228,11 +1250,11 @@ private final class IslandMarkerGroup: NSView {
     static let markerGap: CGFloat = 4.5
 
     /// Width of a two-digit count at the width the cell needs to draw it unclipped
-    /// — see `numberWidth`. `99` is the widest count the pill is provisioned for.
+    /// — see `islandLabelWidth`. `99` is the widest count the pill is provisioned for.
     static let twoDigitCountWidth: CGFloat = {
         let label = NSTextField(labelWithString: "99")
         label.font = numberFont
-        return numberWidth(label)
+        return islandLabelWidth(for: label)
     }()
 
     /// Width of the widest status glyph at the pill's point size, i.e. what a
@@ -1252,25 +1274,6 @@ private final class IslandMarkerGroup: NSView {
     private let numberLabel = NSTextField(labelWithString: "0")
     private let glyphView = NSImageView()
 
-    /// Width the number needs.
-    ///
-    /// `intrinsicContentSize` is the bare tabular advance, but the cell that
-    /// draws the digit lays it out a couple of points in from the frame's edge
-    /// and then **clips at that edge**, so a frame sized to the advance shaves
-    /// the right side of every digit — the widest (`4`) draws out to 8.66pt in a
-    /// 7.5pt advance — while `1` survives, its ink being only ~3.4pt wide. That
-    /// is the "shaved 2" the maintainer saw, and it looks the same on both pills
-    /// because it is the cell's own rendering, not the geometry.
-    ///
-    /// `cellSize` is the cell's answer for how wide it must be to draw this text
-    /// unclipped; it also does not depend on the backing scale the way
-    /// `intrinsicContentSize` does (7.5 at 2x, 8.0 at 1x), so the pill lays out
-    /// identically on both displays.
-    static func numberWidth(_ label: NSTextField) -> CGFloat {
-        let unclipped = label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: 1000, height: 20)).width ?? 0
-        return max(label.intrinsicContentSize.width, unclipped)
-    }
-
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
@@ -1288,10 +1291,10 @@ private final class IslandMarkerGroup: NSView {
     }
 
     /// Full width of the group: marker, gap, digits. The digits get the width the
-    /// cell needs to draw them unclipped, not the bare advance (see `numberWidth`).
+    /// cell needs to draw them unclipped, not the bare advance (`islandLabelWidth`).
     var groupWidth: CGFloat {
         if case .empty = marker { return 0 }
-        return markerWidth + Self.markerGap + Self.numberWidth(numberLabel)
+        return markerWidth + Self.markerGap + islandLabelWidth(for: numberLabel)
     }
 
     private var markerWidth: CGFloat {
@@ -1308,7 +1311,7 @@ private final class IslandMarkerGroup: NSView {
         numberLabel.frame = NSRect(
             x: markerWidth + Self.markerGap,
             y: (bounds.height - labelSize.height) / 2,
-            width: Self.numberWidth(numberLabel),
+            width: islandLabelWidth(for: numberLabel),
             height: labelSize.height
         )
         if case .glyph(let image) = marker {
@@ -1510,10 +1513,17 @@ private final class IslandRowView: NSView {
         glyph.frame = NSRect(x: islandRowLeadingInset, y: nameCenterY - islandRowGlyphSize / 2,
                              width: islandRowGlyphSize, height: islandRowGlyphSize)
         let durationSize = durationLabel.intrinsicContentSize
+        // Right-aligned age. Its width comes from the text's *unclipped* need,
+        // not the bare advance — otherwise the cell clips the trailing glyph
+        // inside the label (`5h36m` loses ~0.8pt off the `m`). Anchoring the
+        // frame's right edge keeps the alignment, so the extra room appears to
+        // its left, which costs the folder name the same hair via `nameWidth`
+        // below.
+        let durationWidth = islandLabelWidth(for: durationLabel)
         durationLabel.frame = NSRect(
-            x: bounds.width - islandRowTrailingInset - durationSize.width,
+            x: bounds.width - islandRowTrailingInset - durationWidth,
             y: nameCenterY - durationSize.height / 2,
-            width: durationSize.width,
+            width: durationWidth,
             height: durationSize.height
         )
         let nameWidth = max(0, durationLabel.frame.minX - islandRowGlyphGap - islandRowTextInset)
