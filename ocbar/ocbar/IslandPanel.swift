@@ -77,24 +77,36 @@ struct IslandContext: Equatable {
     let band: ContextBand
 }
 
-/// Width of each flank of the collapsed pill — the strips either side of the
-/// physical cutout. Asymmetric on purpose: the right flank holds two state
-/// groups, the left one. Both are fixed at launch and independent of the session
-/// counts, so the capsule never resizes as statuses change.
+/// Width of **each** flank of the collapsed pill — the strips either side of the physical
+/// cutout, which are now the *same* width, so the capsule is symmetric about the notch.
 ///
-/// The right flank is exactly the least width that fits two glyph + two-digit
-/// groups (`CollapsedContentView.requiredRightFlankWidth`), derived from the
-/// glyph and number metrics the groups draw with rather than guessed. The left
-/// holds a single dot group, which needs far less, so it is only widened to keep
-/// the flanks' original 41:62 proportion — balance, not fit, and never wider
-/// than the right.
+/// One constant, not two, because symmetry is what sets it: `CollapsedContentView.flankWidth`
+/// is the wider of the two sides' content requirements, applied to both. The sides want
+/// different amounts — the left holds the ring and the running badge (62pt of content plus
+/// clearance), the right holds the three remaining states (130) — and taking the smaller for
+/// the right would be the one thing this pill may not do: the right flank would be
+/// under-provisioned, and `place` trims an overrun at the capsule edge *silently*, so a
+/// fourteen-session finished count would be drawn as `1`. Symmetry at the smaller width would
+/// also be no symmetry at all, since the left's content would then decide the width anyway.
+/// So both wings are 130 and the spare room on the left is the price of a balanced capsule.
 ///
-/// Both flanks sit over the menubar strip either side of the cutout (menu titles
-/// left, status items right), so every extra point covers more menubar: the
-/// growth here is the minimum that makes two-digit counts readable, not slack.
-private let islandRightFlank = CollapsedContentView.requiredRightFlankWidth
-private let islandFlankBalance: CGFloat = 41.0 / 62.0
-private let islandLeftFlank = (islandRightFlank * islandFlankBalance).rounded()
+/// The pill reads left to right as two different questions:
+///
+///   - the **left** flank asks "is work happening, and how much" — the running ring, then the
+///     badge with the number of sessions in it.
+///   - the **right** flank asks "what needs me, most urgent first" — one badge per remaining
+///     state.
+///
+/// This is launch geometry: the window's x is computed from it so the cutout lines up with
+/// the notch, and the collapsed view masks its own bounds as a backstop. Both flanks sit over
+/// the menubar strip either side of the cutout (menu titles left, status items right), so every
+/// extra point covers more menubar. The pill is 445pt — 68pt wider than the 377pt it was when
+/// the wings were sized to their contents — and **all of that growth is leftwards**: the
+/// trailing edge stays at x 980, where it was, so the outer 532pt of menubar (the status items)
+/// is untouched, while the leading edge reaches from 603 to x 535, 68pt deeper into the
+/// menu-title strip. A symmetric capsule for an off-centre notch has to pay for itself
+/// somewhere, and this is where it pays.
+private let islandFlank = CollapsedContentView.flankWidth
 
 // Row geometry, shared by a session row and the folded `+k more` row so the two
 // cannot drift apart.
@@ -169,6 +181,27 @@ func islandLabelWidth(for label: NSTextField) -> CGFloat {
 /// made in a static metrics helper as well as in the panel.
 private let islandPlainCollapsedHeight: CGFloat = 24
 
+/// Width of the stand-in capsule on a display with no cutout: a share of the screen's width,
+/// floored and capped so it stays a pill rather than a band.
+///
+/// **Floored again by what it has to hold**, and that floor is load-bearing: the share alone is
+/// 0.14 × screenWidth, so a 1024pt-wide display asks for 143pt and clamps up to the 160 floor —
+/// and the block that capsule holds in its worst case (ring + four two-digit badges + the gaps
+/// between them, `CollapsedContentView.standInCapsuleMinWidth` = 191) is *wider than 160*. That
+/// is the silent-failure shape this pill is built to avoid: `place` centres what it can and the
+/// view's mask trims the rest, so the finished count would be drawn as `1`. The content floor is
+/// therefore a floor on top of the fraction, not a replacement for it — on the maintainer's
+/// 1512pt display the share (211.7) is still what sets the width, and the floor only ever lifts
+/// a small display (a 1366pt one asks for 191.2, so it is lifted there too; the 240 cap still
+/// holds, so the capsule can never become a band).
+func islandStandInCapsuleWidth(screenWidth: CGFloat) -> CGFloat {
+    let share = min(max(screenWidth * fakeNotchFraction, fakeNotchMinWidth), fakeNotchMaxWidth)
+    return max(share, CollapsedContentView.standInCapsuleMinWidth)
+}
+private let fakeNotchFraction: CGFloat = 0.14
+private let fakeNotchMinWidth: CGFloat = 160
+private let fakeNotchMaxWidth: CGFloat = 240
+
 /// Width the expanded card aims for, measured from the row's own fonts and the
 /// real session titles on this machine (200 most recent), rather than guessed.
 /// Of the three stacked lines the title is the binding one:
@@ -196,7 +229,9 @@ private let expandedWidthFraction: CGFloat = 0.8
 /// Width the expanded card takes on a screen `screenWidth` wide: the derived
 /// target, bounded by `expandedWidthFraction` of the screen so a small display
 /// degrades instead of overflowing, and never narrower than `floor` (the
-/// collapsed capsule the card grows out of).
+/// collapsed capsule the card grows out of — 445pt on the built-in display, where the target
+/// 500pt still wins, so nothing about the card changes; the floor's own threshold moves from
+/// a ~470pt screen to a ~556pt one, below which the card is as wide as the pill it grew from).
 func islandExpandedCardWidth(screenWidth: CGFloat, floor: CGFloat) -> CGFloat {
     max(floor, min(islandExpandedCardTargetWidth, screenWidth * expandedWidthFraction))
 }
@@ -270,10 +305,12 @@ struct IslandListBudget {
 /// CodeIsland-style "Dynamic Island" surface: a borderless, non-activating
 /// panel pinned to the very top edge of **one** screen. Collapsed it hides
 /// inside that screen's notch — or, on a display with no cutout, becomes a
-/// top-centred stand-in capsule — and carries two self-explanatory readouts, one
-/// per flank: a dot with the number of running sessions on the left, and the
-/// non-running states — up to two of them, most urgent first — each with its own
-/// count on the right. On hover it drops an expanded card listing every session.
+/// top-centred stand-in capsule — and answers two questions, one per flank: on the
+/// left "is work happening, and how much" (a status light that is always there, orange
+/// and turning while any session is working and dim and still when none is, followed by
+/// the running badge); on the right "what needs me, most urgent first" (one badge per
+/// remaining state that has sessions). A badge is a status glyph plus the number of
+/// sessions in that status. On hover it drops an expanded card listing every session.
 ///
 /// One instance belongs to one `NSScreen`; `IslandHost` owns the set of them.
 ///
@@ -377,16 +414,14 @@ final class IslandPanel {
     private let rowInset: CGFloat = 8
     private let bottomPadding: CGFloat = 8
     private let expandedCornerRadius: CGFloat = 18
-    /// Fake-notch capsule width for a display with no cutout: a share of the
-    /// screen's width, floored and capped so it stays a pill rather than a band.
-    /// It sits top-centred over that strip of menubar by design — there is no
-    /// cutout to hide inside and no attempt to dodge the menu-bar items.
+    /// Fake-notch capsule width for a display with no cutout. The rule is `islandStandInCapsuleWidth`
+    /// — a share of the screen's width, floored and capped so it stays a pill, and floored again by
+    /// the block it has to hold, which is what keeps a small display from trimming a count. It sits
+    /// top-centred over that strip of menubar by design — there is no cutout to hide inside and no
+    /// attempt to dodge the menu-bar items.
     private func fakeNotchWidth(for screen: NSScreen) -> CGFloat {
-        min(max(screen.frame.width * fakeNotchFraction, fakeNotchMinWidth), fakeNotchMaxWidth)
+        islandStandInCapsuleWidth(screenWidth: screen.frame.width)
     }
-    private let fakeNotchFraction: CGFloat = 0.14
-    private let fakeNotchMinWidth: CGFloat = 160
-    private let fakeNotchMaxWidth: CGFloat = 240
     /// Height of the inert `+k more` row that closes a folded list. Shorter than
     /// a session row on purpose: it is a footnote, not a session.
     private let summaryRowHeight: CGFloat = 24
@@ -489,16 +524,15 @@ final class IslandPanel {
         )
     }
 
-    /// The collapsed pill. On a notched display it is the cutout flanked by a
-    /// status strip each side, so the readouts are actually visible next to the
-    /// physical cutout — the flanks are deliberately asymmetric
-    /// (`islandLeftFlank` / `islandRightFlank`) and the total is fixed, so the
-    /// capsule never resizes as statuses change. A display with no cutout has
+    /// The collapsed pill. On a notched display it is the cutout flanked by a status strip each
+    /// side, so the readouts are actually visible next to the physical cutout — the two flanks
+    /// are the same width by construction (`islandFlank`, symmetric about the cutout) and the
+    /// total is fixed, so the capsule never resizes as statuses change. A display with no cutout has
     /// nothing to flank, so the same content becomes one continuous top-centred
     /// capsule instead (`fakeNotchWidth`), with no gap to bridge.
     private func collapsedSize(metrics: ScreenMetrics) -> NSSize {
         if metrics.notched {
-            return NSSize(width: islandLeftFlank + metrics.notchWidth + islandRightFlank, height: metrics.topInset)
+            return NSSize(width: 2 * islandFlank + metrics.notchWidth, height: metrics.topInset)
         }
         return NSSize(width: fakeNotchWidth(for: metrics.screen), height: islandPlainCollapsedHeight)
     }
@@ -528,13 +562,13 @@ final class IslandPanel {
             // Anchor on the cutout, not the screen centre, so the cutout lands
             // exactly under the notch: the pill spans
             // `cutoutLeft - leftFlank … cutoutRight + rightFlank`, which puts
-            // its left edge at exactly `notchOrigin - islandLeftFlank`. When the
+            // its left edge at exactly `notchOrigin - islandFlank`. When the
             // card is expanded it is wider than the pill, so it is centred on
             // the cutout instead.
             if expanded {
                 x = metrics.notchOrigin + metrics.notchWidth / 2 - size.width / 2
             } else {
-                x = metrics.notchOrigin - islandLeftFlank
+                x = metrics.notchOrigin - islandFlank
             }
         } else {
             // No cutout to anchor on: the card is centred on the screen, which
@@ -607,10 +641,11 @@ final class IslandPanel {
         let collapsed = CollapsedContentView(frame: card.bounds)
         collapsed.autoresizingMask = [.width, .height]
         collapsed.wantsLayer = true
-        // The right flank is sized so two two-digit groups fit with clearance, but a
-        // three-digit count (or a wider glyph) can still overrun it. This mask is
-        // the backstop for that: the overflow is trimmed at the capsule's edge
-        // rather than painted past it.
+        // Both flanks are sized so their own worst case (one two-digit badge per slot they
+        // hold) fits with clearance, but a three-digit count (or a wider glyph) can still
+        // overrun one — and on a display with no cutout the stand-in capsule can be too
+        // narrow to hold the whole block. This mask is the backstop for both: the overflow
+        // is trimmed at the capsule's edge rather than painted past it.
         collapsed.layer?.masksToBounds = true
         card.addSubview(collapsed)
 
@@ -705,45 +740,31 @@ final class IslandPanel {
         }
     }
 
-    /// The collapsed pill's two readouts: how many sessions are running (left)
-    /// and which non-running states need attention (right). Left answers "how
-    /// many are working", right answers "what needs me": each distinct
-    /// non-running state gets its own tinted glyph and count, most urgent first,
-    /// up to the two the flank can hold. Cheap: the collapsed view relayouts
-    /// only when a count or one of the shown states changes.
+    /// The collapsed pill's readouts, as one dictionary: how many sessions are in
+    /// each state, counted once and handed over whole.
+    ///
+    /// The pill is the only surface that reads it, and it derives *everything*
+    /// from it — the badge per state and the left flank's status light — so the mark
+    /// is orange and turning exactly while the orange badge is showing and the two
+    /// can never drift apart. Cheap: the collapsed view relayouts only when a count
+    /// changes.
     private func refreshCollapsed() {
-        var busy = 0
-        var waiting = 0
-        var idle = 0
-        var errors = 0
-        for row in rows {
-            switch row.status {
-            case .busy: busy += 1
-            case .waiting: waiting += 1
-            case .idle: idle += 1
-            case .error: errors += 1
-            }
-        }
-        collapsedView?.busyCount = busy
-        collapsedView?.attentions = Self.attentionStates(errors: errors, waiting: waiting, idle: idle)
+        collapsedView?.counts = Self.statusCounts(rows)
     }
 
-    /// The right flank's groups, ranked error > waiting > idle. The flank holds
-    /// two, so the least urgent state beyond that is dropped — with an error, a
-    /// waiting and a finished session the pill shows `! n ? m` and only the
-    /// finished count goes. Dropping is deliberate and is the whole point: a
-    /// single rolled-up count would misreport the state, and spending a group on
-    /// an ellipsis would hide one state to say nothing about another.
-    private static func attentionStates(
-        errors: Int,
-        waiting: Int,
-        idle: Int
-    ) -> [CollapsedContentView.Attention] {
-        var states: [CollapsedContentView.Attention] = []
-        if errors > 0 { states.append(.init(status: .error, count: errors)) }
-        if waiting > 0 { states.append(.init(status: .waiting, count: waiting)) }
-        if idle > 0 { states.append(.init(status: .idle, count: idle)) }
-        return Array(states.prefix(CollapsedContentView.maxAttentionGroups))
+    /// Sessions per state, for the pill. Every state is counted and every count is
+    /// handed over: each state has its own slot on one flank or the other, so nothing
+    /// is dropped and there is no ranking for the caller to apply here. The *order* the
+    /// slots are drawn in is the pill's own two questions —
+    /// `CollapsedContentView.badgeStatuses`, running first (left flank) and then the
+    /// right flank's most-urgent-first list — which keeps the right flank's reading
+    /// identical to how the expanded card sorts its rows (`attentionRanked`).
+    private static func statusCounts(_ rows: [IslandRow]) -> [SessionStatus: Int] {
+        var counts: [SessionStatus: Int] = [:]
+        for row in rows {
+            counts[row.status, default: 0] += 1
+        }
+        return counts
     }
 
     // MARK: - Show / hide
@@ -758,6 +779,10 @@ final class IslandPanel {
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         visible = true
+        // Now that the pill is really on screen its status light may animate; the
+        // same flag is cleared in `hide()`, which is the only other place this
+        // panel is ordered out.
+        collapsedView?.onScreen = true
         startHoverTimer()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.15
@@ -771,6 +796,10 @@ final class IslandPanel {
         expandedState = false
         guard visible else { return }
         visible = false
+        // Off screen means nothing may keep animating: the status light's ticker
+        // stops here, and the pill's counts stay as they were for the next time
+        // the island is shown.
+        collapsedView?.onScreen = false
         panel?.orderOut(nil)
         applyAppearance(expanded: false, metrics: currentMetrics(), animated: false)
     }
@@ -1030,71 +1059,181 @@ private final class IslandCardView: NSView {
 
 // MARK: - Collapsed content
 
-/// The collapsed pill's content, split across the two flanks of the physical
-/// cutout — the notch has no pixels, so nothing may be drawn across the middle
-/// of the pill. The left flank carries one small, self-explanatory group: a
-/// filled orange dot plus the number of *running* (busy) sessions. The right
-/// flank carries the *non-running* states, each as a tinted glyph plus its own
-/// count, up to two of them side by side. Left answers "how many are working",
-/// right answers "what needs me"; a bare digit was meaningless, the marker is
-/// what gives it meaning.
+/// The collapsed pill's content, split by the physical cutout — the notch has no
+/// pixels, so nothing may be drawn across the middle of the pill, and the cutout is
+/// itself the divider between the two sides. The pill reads left to right as two
+/// different questions, and neither flank is now a single list of urgency:
+///
+///   - **left: "is work happening, and how much".** A hollow ring
+///     (`IslandActivityView`) — orange and turning while any session is running, dim
+///     neutral and still when none is, **always there**, so that side of the pill is
+///     never a blank stub — followed by the running badge, `⟳` orange and the number of
+///     sessions working. The ring answers "is it happening" in two channels (tint *and*
+///     motion) precisely so that taking the motion away — Reduce Motion — does not take
+///     the answer with it; the badge answers "how many".
+///   - **right: "what needs me, most urgent first".** One badge per remaining state that
+///     has sessions — error `!` red, waiting `?` blue, idle `✓` green, in that order —
+///     each a status glyph plus the number of sessions in that state. This is the order
+///     `IslandPanel.attentionRank` sorts the expanded card's rows by, so the wing still
+///     states the card's priority; the running state is simply no longer part of it.
+///
+/// The marking carries the running count on **both** sides of the cutout, which is not
+/// noise: the ring is the pill's *pulse* (something is happening now, right at the pill's
+/// leading edge) and the badge beside it is its *tally* (how many). Both are read from one
+/// dictionary (`counts`) and gated on the same count, so the ring cannot turn while the
+/// badge is absent or vice versa. CodeIsland pairs its mascot with a count the same way.
+///
+/// **Every state gets its own slot, so nothing is ever dropped.** With an error, a waiting,
+/// a running and a finished session the pill shows all four badges — one on the left with
+/// the ring, three on the right — and both flanks are provisioned for their own slots at
+/// two digits (`requiredLeftFlankWidth`, `requiredRightFlankWidth`). That is the lesson of
+/// the two designs that failed here. The first drew a hand-drawn 8pt dot beside 11pt SF
+/// Symbols whose ink measures 12pt: the busiest state at 67% of its neighbours' size, sitting in
+/// the badge row where a badge was expected, drawn by separate code, which is why nothing
+/// caught it. The second drew a glyph + count group per state but capped at two, so a state
+/// was dropped — a *fact* the pill knows and chose not to show. This design keeps the ring
+/// out of the badge rows entirely — it is a different shape class from their filled discs,
+/// at the badge glyphs' own apparent size and carrying no count, so it cannot be read as a
+/// badge that lost its number — and gives every state a slot of its own at one size, so no
+/// badge is a different kind of thing from its neighbour and no state is left out.
 private final class CollapsedContentView: NSView {
 
-    /// How many non-busy state groups the right flank shows at once. Beyond this the
-    /// caller drops the least urgent state.
-    static let maxAttentionGroups = 2
+    /// The states the **right** flank shows, one badge each, most urgent first. These are
+    /// `IslandPanel.attentionRank`'s ranking minus the running state, which lives on the
+    /// other flank now, and the badges' left-to-right order *is* that ranking: the right
+    /// flank states the same priority the expanded card sorts its rows by, so the two
+    /// cannot disagree about which state matters more.
+    static let rightBadgeOrder: [SessionStatus] = [.error, .waiting, .idle]
 
-    /// Space between two groups in a flank. A group's own marker-to-number gap is
-    /// 4.5pt, so this has to read as a stronger separation.
+    /// The state the **left** flank's badge shows: how many sessions are working, beside
+    /// the ring that says whether any are. It is named apart from `rightBadgeOrder` on
+    /// purpose — the pill's left-to-right reading is **no longer one urgency list**: it
+    /// is "is work happening + how much" (left), then "what needs me, most urgent first"
+    /// (right). Ranking the running count inside the right flank's order is what made the
+    /// old single `badgeOrder` a lie once the badge moved.
+    static let runningStatus: SessionStatus = .busy
+
+    /// Every status that can carry a badge, in the pill's reading order: the running one
+    /// first, then the right flank's, most urgent first. One place that lists all four,
+    /// so a state cannot be forgotten by one side while the other draws it.
+    static var badgeStatuses: [SessionStatus] { [runningStatus] + rightBadgeOrder }
+
+    /// Space between two elements sitting in the same region: the ring and the running
+    /// badge in the left flank, two badges in the right flank, or the whole capsule on a
+    /// display with no cutout, where everything sits together in one block. A badge's own
+    /// glyph-to-number gap is 4.5pt, so this has to read as a stronger separation.
     static let groupGap: CGFloat = 6
 
     /// Clearance kept between the drawn content and each edge it sits near — the
     /// cutout edge and the capsule edge.
     static let minFlankClearance: CGFloat = 2
 
-    /// Breathing room on top of that minimum, so two two-digit groups never sit
+    /// Breathing room on top of that minimum, so a two-digit badge never sits
     /// flush against the flank's edges.
     static let flankMargin: CGFloat = 2
 
-    /// Least width the right flank needs to show two glyph groups with two-digit
-    /// counts, the full `groupGap` and the clearance on both sides. Derived from
-    /// the same glyph and number metrics the groups draw with, so it cannot drift
-    /// from them — and it is the *least* such width: a three-digit count would
-    /// need `IslandMarkerGroup.widestGlyphWidth + markerGap + 3 digits` per group
-    /// and would still clip here, which is the documented limit rather than
-    /// something to over-provision for.
-    static let requiredRightFlankWidth: CGFloat = {
-        let group = IslandMarkerGroup.widestGlyphWidth
-            + IslandMarkerGroup.markerGap
-            + IslandMarkerGroup.twoDigitCountWidth
-        return (2 * group + groupGap + 2 * minFlankClearance + flankMargin).rounded(.up)
+    /// Least width the **stand-in capsule** needs on a display with no cutout, where the ring and
+    /// all four badges sit in one centred block: ring + one two-digit badge per state + the gaps
+    /// between them + the same clearance the wings use. This is the floor `islandStandInCapsuleWidth`
+    /// puts under its screen share; without it the share's own 160pt floor is narrower than the
+    /// block (191pt), and the last badge would be trimmed at the capsule's edge — a wrong count,
+    /// silently, on a small external display.
+    static let standInCapsuleMinWidth: CGFloat = {
+        let items = 1 + badgeStatuses.count
+        let content = IslandActivityView.diameterCap + CGFloat(badgeStatuses.count) * twoDigitBadgeWidth
+        let gaps = CGFloat(items - 1) * groupGap
+        return (content + gaps + 2 * minFlankClearance + flankMargin).rounded(.up)
     }()
 
-    /// One non-busy state on show, with its own count.
-    struct Attention: Equatable {
-        let status: SessionStatus
-        let count: Int
+    /// Width of **both** flanks of the notched pill. Symmetry sets it: it is the wider of the
+    /// two sides' content requirements, and both sides get it. See `islandFlank` for why the
+    /// smaller (one-digit) reading of the right flank is not an option — `place` trims an
+    /// overrun at the capsule edge silently, and a wrong count is the one thing this pill may
+    /// not do. Every extra point sits over the menubar strip either side of the cutout.
+    static let flankWidth: CGFloat = max(requiredLeftFlankWidth, requiredRightFlankWidth)
+
+    /// What the **left** flank's content costs at its widest: the ring, the gap, one two-digit
+    /// badge. The flank is wider than that once symmetry is taken into account, and this is the
+    /// width its content is centred against (`leftContentInset`).
+    private static var leftContentWidth: CGFloat {
+        IslandActivityView.diameterCap + groupGap + twoDigitBadgeWidth
     }
 
-    /// Busy sessions counted on the left flank. Zero hides the whole group.
-    var busyCount: Int = 0 {
+    /// Where the left flank's content starts, so the pair it is provisioned for sits **centred**
+    /// in the symmetrically-sized wing: `(flankWidth − leftContentWidth) / 2`.
+    ///
+    /// A *fixed* offset, which is the whole point: the ring is the one element that is always
+    /// there, so its position is a landmark, and the layout pins it here whether or not the
+    /// running badge is beside it. Centring the *actual* content instead would drag the ring
+    /// 21.5pt sideways every time a session started or stopped. The consequence when nothing is
+    /// running is that the ring sits at this offset with the badge's room empty to its right —
+    /// and since that room runs into the cutout, which has no pixels either, the emptiness is
+    /// black beside black and reads as the notch being wider, not as a hole in the pill.
+    static var leftContentInset: CGFloat {
+        ((flankWidth - leftContentWidth) / 2).rounded()
+    }
+
+    /// Least width the right flank needs: one two-digit badge per state it holds, the full
+    /// `groupGap` between them and the clearance on both sides. Derived from the same
+    /// glyph and number metrics the badges draw with (`twoDigitBadgeWidth`), so it cannot
+    /// drift from them — and it is the *least* such width: a three-digit count would need
+    /// `IslandMarkerGroup.widestGlyphWidth + markerGap + 3 digits` per badge and would
+    /// still clip here, which is the documented limit rather than something to
+    /// over-provision for.
+    ///
+    /// Sized for its slots at two digits rather than at one on purpose. A count is a fact,
+    /// and the alternative fails *silently*: the block is trimmed at the capsule's edge
+    /// (`place`), so a twelve-session finished count in a one-digit-wide slot would be
+    /// drawn as `1` rather than being visibly wrong. Rare here, but this is the surface
+    /// whose whole job is to be read at a glance, so a wrong number is the one thing it
+    /// may not do.
+    static let requiredRightFlankWidth: CGFloat = {
+        let slots = CGFloat(rightBadgeOrder.count)
+        return (slots * twoDigitBadgeWidth + (slots - 1) * groupGap + 2 * minFlankClearance + flankMargin).rounded(.up)
+    }()
+
+    /// Least width the left flank needs: the running ring, the gap, and one two-digit
+    /// running badge, with the clearance on both sides — the same formula as the right
+    /// flank's, over the two things this side holds.
+    ///
+    /// The rounding is the only slack, and it is the same slack the right flank always
+    /// had: at two digits the content is 55.06 of the 62pt, leaving 3.47pt per side against
+    /// `minFlankClearance`'s 2 — and because `place` measures the *gap* from what is left
+    /// over, the full `groupGap` survives rather than being squeezed to fit.
+    static let requiredLeftFlankWidth: CGFloat = {
+        (IslandActivityView.diameterCap + groupGap + twoDigitBadgeWidth
+            + 2 * minFlankClearance + flankMargin).rounded(.up)
+    }()
+
+    /// What one badge costs at the widest count both flanks are provisioned for. Shared
+    /// by the two flank widths so they cannot disagree about the size of the unit they
+    /// are built from.
+    private static var twoDigitBadgeWidth: CGFloat {
+        IslandMarkerGroup.widestGlyphWidth
+            + IslandMarkerGroup.markerGap
+            + IslandMarkerGroup.twoDigitCountWidth
+    }
+
+    /// Sessions in each state, straight from the caller — **the pill's only
+    /// input**. The badges are one per non-empty state and the ring plays while
+    /// `.busy` is non-zero, both read from this one dictionary, so "the ring is
+    /// turning" and "the running badge is showing" cannot drift apart. A missing
+    /// or zero entry is an absent badge: a `0` beside a glyph would report a state
+    /// that is not happening, and an empty side already says "none" without
+    /// spending a badge on it.
+    var counts: [SessionStatus: Int] = [:] {
         didSet {
-            guard busyCount != oldValue else { return }
-            leftGroup.number = busyCount
-            leftGroup.isHidden = busyCount == 0
+            guard counts != oldValue else { return }
+            applyCounts()
             needsLayout = true
         }
     }
 
-    /// The non-busy states on the right flank, most urgent first, at most
-    /// `maxAttentionGroups` of them. Empty (nothing non-busy) hides the whole
-    /// side — the "quiet while working" case.
-    var attentions: [Attention] = [] {
-        didSet {
-            guard attentions != oldValue else { return }
-            applyAttentions()
-            needsLayout = true
-        }
+    /// Whether the island is on screen, forwarded to the left flank's mark: nothing
+    /// the pill *draws* depends on it, but the mark must not turn where nobody can
+    /// see it (see `IslandActivityView`).
+    var onScreen = false {
+        didSet { activity.onScreen = onScreen }
     }
 
     var notched = false {
@@ -1104,18 +1243,23 @@ private final class CollapsedContentView: NSView {
         didSet { if notchWidth != oldValue { needsLayout = true } }
     }
 
-    private let leftGroup = IslandMarkerGroup(frame: .zero)
-    private let rightGroups = (0..<CollapsedContentView.maxAttentionGroups)
-        .map { _ in IslandMarkerGroup(frame: .zero) }
+    /// The left flank's status light, and one badge group per state — including the
+    /// running one, whose group is laid out in the *left* flank. The badges only exist as
+    /// "this many sessions in this state", so an empty slot is empty rather than showing a
+    /// zero; the mark is the opposite — always there, because the wing it sits in must
+    /// never be blank.
+    private let activity = IslandActivityView(frame: .zero)
+    private let groups: [SessionStatus: IslandMarkerGroup] = Dictionary(
+        uniqueKeysWithValues: CollapsedContentView.badgeStatuses.map { ($0, IslandMarkerGroup(frame: .zero)) }
+    )
 
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        leftGroup.marker = .dot(.systemOrange)
-        leftGroup.isHidden = true
-        addSubview(leftGroup)
-        for group in rightGroups {
+        addSubview(activity)
+        for status in Self.badgeStatuses {
+            guard let group = groups[status] else { continue }
             group.isHidden = true
             addSubview(group)
         }
@@ -1125,25 +1269,55 @@ private final class CollapsedContentView: NSView {
         fatalError("init(coder:) is not used")
     }
 
-    private func applyAttentions() {
-        for (index, group) in rightGroups.enumerated() {
-            guard index < attentions.count else {
+    /// Fill the pill from `counts`: the mark's state first, then one badge per
+    /// non-empty state, both through the pill's single badge vocabulary below.
+    /// Both sides are filled here and nowhere else, and the mark's running tint
+    /// comes from the same `color(for:)` the orange badge uses, so the pill still
+    /// has exactly one place where a status becomes a glyph and a tint.
+    ///
+    /// The mark is never hidden — see `IslandActivityView`: it is the left flank's
+    /// status light, so with nothing running it is still there, dim and still,
+    /// rather than leaving that side of the pill blank.
+    private func applyCounts() {
+        activity.runningTint = Self.color(for: Self.runningStatus)
+        activity.running = (counts[Self.runningStatus] ?? 0) > 0
+        for status in Self.badgeStatuses {
+            guard let group = groups[status] else { continue }
+            let count = counts[status] ?? 0
+            guard count > 0 else {
+                group.clear()
                 group.isHidden = true
                 continue
             }
-            let attention = attentions[index]
-            group.number = attention.count
-            if let image = islandSymbolImage(
-                symbol: Self.symbol(for: attention.status),
-                color: Self.color(for: attention.status),
-                pointSize: 11
-            ) {
-                group.marker = .glyph(image)
-            }
-            group.isHidden = false
+            show(status, count: count, in: group)
         }
     }
 
+    /// Point one badge at a status and a count. The design that failed here wrote
+    /// the two flanks in two separate places and drew them with two different
+    /// techniques, which is how the left ended up 8pt against 12pt; there is one
+    /// place now, and it fills every badge on the pill.
+    private func show(_ status: SessionStatus, count: Int, in group: IslandMarkerGroup) {
+        guard let image = IslandMarkerGroup.badgeImage(
+            symbol: Self.symbol(for: status),
+            color: Self.color(for: status),
+            description: status.rawValue
+        ) else {
+            // Without its glyph a count is a digit with no meaning, so the badge
+            // is dropped whole rather than half-drawn.
+            group.clear()
+            group.isHidden = true
+            return
+        }
+        group.marker = image
+        group.number = count
+        group.isHidden = false
+    }
+
+    /// The pill's badge vocabulary: the one place a status becomes a glyph and a
+    /// tint, so a status can only ever look like one thing on the pill. The busy
+    /// entry is the same symbol the menubar's spinner and the expanded card's
+    /// rows use for a running session.
     private static func symbol(for status: SessionStatus) -> String {
         switch status {
         case .busy: return "arrow.clockwise.circle.fill"
@@ -1164,49 +1338,104 @@ private final class CollapsedContentView: NSView {
 
     override func layout() {
         super.layout()
+        // The running badge belongs to the left flank, the rest to the right — two named
+        // orders (`runningStatus`, `rightBadgeOrder`), not one list.
+        let leftBadges = [Self.runningStatus].compactMap { groups[$0] }.filter { !$0.isHidden }
+        let rightBadges = Self.rightBadgeOrder.compactMap { groups[$0] }.filter { !$0.isHidden }
         if notched && notchWidth > 0 {
-            // The window is positioned so the cutout's left edge sits exactly
-            // `islandLeftFlank` in from the pill's left edge, which puts the
-            // cutout at that same x here — no guessing from the view's centre.
-            let cutoutStart = islandLeftFlank
+            // The window is positioned so the cutout's left edge sits exactly `islandFlank`
+            // in from the pill's left edge, which puts the cutout at that same x here — no
+            // guessing from the view's centre. Both regions below are therefore `islandFlank`
+            // wide, because the pill is symmetric by construction. The ring is placed
+            // unconditionally: it cannot be hidden, so the left flank always reserves its
+            // width.
+            let cutoutStart = islandFlank
             let cutoutEnd = cutoutStart + notchWidth
-            if !leftGroup.isHidden {
-                place([leftGroup], in: NSRect(x: 0, y: 0, width: cutoutStart, height: bounds.height))
-            }
-            let right = rightGroups.filter { !$0.isHidden }
-            if !right.isEmpty {
-                place(right, in: NSRect(x: cutoutEnd, y: 0, width: bounds.width - cutoutEnd, height: bounds.height))
+            // Left flank: **pinned** at `leftContentInset`, which is where the ring + running
+            // badge pair sits centred in the wing. Pinned, not centred, so the ring keeps the
+            // same spot whether or not the badge is beside it — centring the actual content
+            // would drag the landmark 21.5pt sideways every time a session started or stopped.
+            var leftItems: [IslandFlankElement] = [activity]
+            leftItems.append(contentsOf: leftBadges)
+            place(leftItems, in: NSRect(x: 0, y: 0, width: cutoutStart, height: bounds.height),
+                  alignment: .pinned(inset: Self.leftContentInset))
+            if !rightBadges.isEmpty {
+                // Right flank: **centred** — it holds a tally whose badges are peers, with
+                // no always-present element whose position is a landmark.
+                place(rightBadges, in: NSRect(x: cutoutEnd, y: 0, width: bounds.width - cutoutEnd, height: bounds.height))
             }
         } else {
-            // No cutout: both sides simply sit together, centred in the pill.
-            var groups: [IslandMarkerGroup] = []
-            if !leftGroup.isHidden { groups.append(leftGroup) }
-            groups.append(contentsOf: rightGroups.filter { !$0.isHidden })
-            if !groups.isEmpty { place(groups, in: bounds) }
+            // No cutout: the ring, the running badge and the rest sit together as one
+            // block, centred in the stand-in capsule, in the same left-to-right reading
+            // order. One region, so one alignment.
+            var items: [IslandFlankElement] = [activity]
+            items.append(contentsOf: leftBadges)
+            items.append(contentsOf: rightBadges)
+            place(items, in: bounds)
         }
     }
 
-    /// Lay groups out left-to-right inside `region`, the block centred so both
-    /// edges get the same clearance. The right flank is now sized so that cannot
-    /// happen (see `requiredRightFlankWidth`), but the shrinking and clamping stay
-    /// as a backstop: a three-digit count, or a wider glyph than today's, shrinks
-    /// the gap first, down to zero, before the clearance is allowed to give. If
-    /// the groups are still wider than the region the block is clamped so its
-    /// left edge stays on the region's edge and never crosses the cutout; the view
-    /// masks its own bounds, so whatever is still past the far edge is trimmed
-    /// there rather than painted over the capsule.
-    private func place(_ groups: [IslandMarkerGroup], in region: NSRect) {
-        let widths = groups.map { $0.groupWidth }
+    /// How `place` puts a block of elements inside its region.
+    private enum FlankAlignment {
+        /// Centre the block, so both edges get the same clearance. The right flank's badges are
+        /// peers of one tally and none of them is always there, so the block re-centring when
+        /// its set changes is a group reflow, not a landmark moving.
+        case centred
+        /// Pin the block's leading edge `inset` inside the region. The left flank's ring is
+        /// always present, so its position is a landmark and must not move when the badge beside
+        /// it comes and goes. Its inset parks the ring + badge pair dead centre of the wing.
+        case pinned(inset: CGFloat)
+    }
+
+    /// Lay elements out left-to-right inside `region`, at the alignment the caller asks
+    /// for. Each element answers for its own width at the height it is given, so the ring
+    /// and the badges go through one placement path rather than two — the two that drifted
+    /// apart before were positioned by separate code as well as drawn by it.
+    ///
+    /// **The right flank is centred, never anchored** to the cutout or the capsule's outer
+    /// edge. It is provisioned for three badges but usually holds one or two, so anchoring
+    /// would put the ink at one end of a mostly-empty black wing: a badge floating 100pt
+    /// from the cutout, or a black gap between the cutout and the badges that reads as a
+    /// mistake. Centring keeps that wing symmetric around whatever it holds. The cost is
+    /// that a badge shifts by ~18pt when a state appears or disappears — acceptable
+    /// because those badges are peers of one tally, so the eye follows the group, not any
+    /// single badge.
+    ///
+    /// **The left flank is pinned** (`.pinned`), at `leftContentInset`: its ring is always
+    /// present, so its position is a landmark, and centring the *actual* content would move that
+    /// landmark 21.5pt every time a session starts or stops. Pinning it where the ring + badge
+    /// pair sits centred means the wing looks balanced whenever something is running (the common
+    /// case) and the ring does not budge when it stops — with the badge's room left empty next to
+    /// a cutout that is equally black, so nothing reads as missing. It is the one place the two
+    /// wings use different alignments, and the reason is that only the left has an always-present
+    /// element whose position is a landmark.
+    ///
+    /// The flanks are sized so their worst cases cannot overrun them (see
+    /// `requiredRightFlankWidth` and `requiredLeftFlankWidth`), but the shrinking and
+    /// clamping stay as a backstop: a three-digit count, a wider glyph than today's, or
+    /// the narrow stand-in capsule on a display with no cutout shrinks the gap first, down
+    /// to zero, before the clearance is allowed to give. If the elements are still wider
+    /// than the region the block is clamped so its leading edge stays on the region's edge
+    /// and never crosses the cutout; the view masks its own bounds, so whatever is still
+    /// past the far edge is trimmed there rather than painted over the capsule.
+    private func place(_ items: [IslandFlankElement], in region: NSRect, alignment: FlankAlignment = .centred) {
+        let widths = items.map { $0.flankWidth(atHeight: region.height) }
         let content = widths.reduce(0, +)
         var gap = Self.groupGap
-        if groups.count > 1 {
+        if items.count > 1 {
             gap = min(gap, max(0, region.width - content - Self.minFlankClearance * 2))
         }
-        let total = content + gap * CGFloat(groups.count - 1)
-        let x = max(region.minX, min(region.minX + (region.width - total) / 2, region.maxX - total))
+        let total = content + gap * CGFloat(items.count - 1)
+        let x: CGFloat
+        switch alignment {
+        case .centred:
+            x = max(region.minX, min(region.minX + (region.width - total) / 2, region.maxX - total))
+        case .pinned(let inset):
+            x = max(region.minX, min(region.minX + inset, region.maxX - total))
+        }
         var cursor = x
-        for (index, group) in groups.enumerated() {
-            group.frame = NSRect(
+        for (index, item) in items.enumerated() {
+            item.frame = NSRect(
                 x: cursor.rounded(),
                 y: region.minY,
                 width: widths[index],
@@ -1217,22 +1446,40 @@ private final class CollapsedContentView: NSView {
     }
 }
 
-/// One group in a flank of the collapsed pill: a small marker followed by the
-/// number of sessions it counts. The left group's marker is a plain filled dot
-/// — "how many are working" — while a right group's is a tinted SF Symbol —
-/// "what needs me". The number uses tabular digits so the group's width does not
-/// jitter as the count changes.
-private final class IslandMarkerGroup: NSView {
+/// Anything the collapsed pill lays out in a flank or in the stand-in capsule: the
+/// left flank's status light and a badge group. Both answer for their own width at the
+/// height they are given, so one placement path lays out both and neither can be
+/// positioned by code that does not know how it is drawn.
+private protocol IslandFlankElement: NSView {
+    func flankWidth(atHeight height: CGFloat) -> CGFloat
+}
 
-    enum Marker {
-        case empty
-        case dot(NSColor)
-        case glyph(NSImage)
-    }
+/// One badge on the collapsed pill — the running one in the left flank, the rest in the
+/// right: a status glyph followed by the number of sessions in that status.
+///
+/// Deliberately dumb — it draws a glyph and a count and does not know what a
+/// status is — because the pill must have exactly one way to fill a badge
+/// (`CollapsedContentView.show(_:count:in:)`). It also has **no second marker
+/// kind**: the hand-drawn 8pt dot that used to sit on the left flank painted 67%
+/// of the ink its neighbours' glyphs did, and being drawn by separate code is
+/// precisely why nothing caught that. The left flank no longer draws a badge at
+/// all — the left flank's ring is a different shape class, matched to a glyph's apparent
+/// size and carrying no count, so it cannot be read as a badge or compared with one (see
+/// `IslandActivityView`); the badges themselves are one
+/// construction, one point size, measured from the same constants the flank widths
+/// are derived from.
+///
+/// The number uses tabular digits so a badge's width does not jitter as the
+/// count changes.
+private final class IslandMarkerGroup: NSView, IslandFlankElement {
 
-    var marker: Marker = .empty {
+    /// The badge's leading glyph, already tinted for its status. Nil means the
+    /// group holds no badge at all — its width is then 0 and the count is not
+    /// drawn either, because a number without its glyph says nothing.
+    var marker: NSImage? {
         didSet { applyMarker() }
     }
+
     var number: Int = 0 {
         didSet {
             guard number != oldValue else { return }
@@ -1241,13 +1488,43 @@ private final class IslandMarkerGroup: NSView {
         }
     }
 
-    /// The pill's number font and the two metrics the pill's own groups are
-    /// measured with. Kept static so the flank widths (`islandLeftFlank` /
-    /// `islandRightFlank`) can be derived from the very numbers that are drawn,
+    /// Drop the badge: no glyph, no count. The caller hides the group as well.
+    func clear() {
+        marker = nil
+        number = 0
+    }
+
+    /// The pill's number font and the metrics the pill's own badges are measured
+    /// with. Kept static so the flank width (`islandFlank`) can be derived from the
+    /// very numbers that are drawn,
     /// instead of from a guess that could drift away from them.
     static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
-    static let dotDiameter: CGFloat = 8
+
+    /// Point size and weight of every badge glyph on the pill — one value for the
+    /// whole pill, read both by `badgeImage` (what is drawn) and by
+    /// `widestGlyphWidth` (what is measured), so the two cannot disagree. At this size the
+    /// circle glyphs' ink **measures 12.00 × 12.00pt** inside their 14pt image box, read off the
+    /// pill's own render at 1×, 2× and 8× (the harness prints it beside the ring's box in
+    /// `silhouetteMatch`). Measure it as the silhouette's **extent** — any pixel the shape reaches
+    /// into — not as its solid core: a filled symbol's outermost sliver is a low-coverage skirt, so a
+    /// strict cut-off (>25%) reports 11.0–11.25 while a stroked ring's harder edge still reports
+    /// 12.00. That is rim *density*, not size, and conflating the two is what produced the wrong
+    /// "the ring is 0.75pt larger" note this replaced — the two are the same silhouette. The badge
+    /// widths are built from the *box* — that is what has to fit — while the ring's cap is built from
+    /// the ink, because that is what the eye compares it with.
+    static let markerPointSize: CGFloat = 11
+    static let markerWeight: NSFont.Weight = .semibold
+
+    /// Space between a badge's glyph and its count.
     static let markerGap: CGFloat = 4.5
+
+    /// A badge's glyph, built exactly as `widestGlyphWidth` measures it and tinted
+    /// for the status. `description` is what the glyph means for accessibility.
+    static func badgeImage(symbol: String, color: NSColor, description: String?) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: markerPointSize, weight: markerWeight)
+        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: description) else { return nil }
+        return islandTinted(base.withSymbolConfiguration(config) ?? base, color: color)
+    }
 
     /// Width of a two-digit count at the width the cell needs to draw it unclipped
     /// — see `islandLabelWidth`. `99` is the widest count the pill is provisioned for.
@@ -1257,16 +1534,18 @@ private final class IslandMarkerGroup: NSView {
         return islandLabelWidth(for: label)
     }()
 
-    /// Width of the widest status glyph at the pill's point size, i.e. what a
-    /// right-flank marker costs. Measured from the symbols the groups actually
-    /// use, so it cannot go stale if a symbol's artwork changes.
+    /// Width of the widest status glyph at the pill's point size: what the marker
+    /// of *any* badge costs, the running one included now that it is a glyph
+    /// rather than a dot of its own size. Measured from the symbols the badges
+    /// actually use, at the point size they are actually drawn at, so it cannot
+    /// go stale if a symbol's artwork changes.
     static let widestGlyphWidth: CGFloat = {
-        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        let config = NSImage.SymbolConfiguration(pointSize: markerPointSize, weight: markerWeight)
         let symbols = ["arrow.clockwise.circle.fill", "questionmark.circle.fill",
                        "checkmark.circle.fill", "exclamationmark.triangle.fill"]
         let widths = symbols.compactMap { name -> CGFloat? in
             guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-            return (base.withSymbolConfiguration(cfg) ?? base).size.width
+            return (base.withSymbolConfiguration(config) ?? base).size.width
         }
         return widths.max() ?? 14
     }()
@@ -1280,6 +1559,7 @@ private final class IslandMarkerGroup: NSView {
         super.init(frame: frameRect)
         numberLabel.font = Self.numberFont
         numberLabel.textColor = NSColor.white.withAlphaComponent(0.92)
+        numberLabel.isHidden = true
         addSubview(numberLabel)
         glyphView.imageScaling = .scaleProportionallyDown
         glyphView.isHidden = true
@@ -1290,20 +1570,17 @@ private final class IslandMarkerGroup: NSView {
         fatalError("init(coder:) is not used")
     }
 
-    /// Full width of the group: marker, gap, digits. The digits get the width the
-    /// cell needs to draw them unclipped, not the bare advance (`islandLabelWidth`).
-    var groupWidth: CGFloat {
-        if case .empty = marker { return 0 }
+    /// Full width of the badge: glyph, gap, digits. The digits get the width the
+    /// cell needs to draw them unclipped, not the bare advance
+    /// (`islandLabelWidth`). Zero without a glyph. A badge is a fixed-height
+    /// thumbnail of one status, so it ignores the height it is asked about — only
+    /// the status light's size depends on the pill's height.
+    func flankWidth(atHeight height: CGFloat) -> CGFloat {
+        guard marker != nil else { return 0 }
         return markerWidth + Self.markerGap + islandLabelWidth(for: numberLabel)
     }
 
-    private var markerWidth: CGFloat {
-        switch marker {
-        case .empty: return 0
-        case .dot: return Self.dotDiameter
-        case .glyph(let image): return image.size.width
-        }
-    }
+    private var markerWidth: CGFloat { marker?.size.width ?? 0 }
 
     override func layout() {
         super.layout()
@@ -1314,7 +1591,7 @@ private final class IslandMarkerGroup: NSView {
             width: islandLabelWidth(for: numberLabel),
             height: labelSize.height
         )
-        if case .glyph(let image) = marker {
+        if let image = marker {
             glyphView.frame = NSRect(
                 x: 0,
                 y: (bounds.height - image.size.height) / 2,
@@ -1325,28 +1602,346 @@ private final class IslandMarkerGroup: NSView {
     }
 
     private func applyMarker() {
-        switch marker {
-        case .empty:
-            glyphView.isHidden = true
-        case .dot:
-            glyphView.isHidden = true
-            needsDisplay = true
-        case .glyph(let image):
-            glyphView.image = image
-            glyphView.isHidden = false
-        }
+        glyphView.image = marker
+        // The glyph leads the count, so neither is drawn without the other: a
+        // bare digit is what made the old dot read as a legend-less status light.
+        glyphView.isHidden = marker == nil
+        numberLabel.isHidden = marker == nil
         needsLayout = true
+    }
+}
+
+/// The left flank's status light: a hollow ring with a gap in it — orange and turning
+/// while a session is running, and the same ring at the same size, dimmed to a neutral
+/// grey and held still, when none is. The running badge sits to its right, so the left
+/// flank reads "is it happening, and how much" before the cutout.
+///
+/// **It is never hidden, and that is the fix for a real complaint.** It used to
+/// exist only while something was running, which left the left flank a blank 32pt
+/// stub of black beside a 173pt wing full of badges whenever nothing was. A blank
+/// wing beside a full one reads as something missing, not as a state: the pill
+/// looked lopsided rather than quiet. So the wing always carries its mark, and the
+/// mark always carries a state — dim and still when nothing is running, bright and
+/// turning when something is. It is the pill's status light.
+///
+/// Two channels say "something is running", and either alone is enough:
+///
+///  - **tint** — `runningTint` (orange, the badge's own running colour) while
+///    running, `restingTint` (a dim neutral) while not;
+///  - **motion** — turning while running, held at `restingAngle` while not.
+///
+/// The redundancy is the whole point: **Reduce Motion deletes the second channel**,
+/// so the first has to carry the state by itself. Under it a running pill is a
+/// bright orange ring held still and a quiet one is a dim grey ring held still —
+/// visibly different pictures, which motion alone could never give. Only two things
+/// can change the tint: `running` going true or false. It does not chase the
+/// per-state colours (an errored or waiting session is the badges' business, and
+/// tracking them here would make the wing flicker between tints), and because
+/// `running` is `counts[.busy] > 0` it stays orange while *any* session is busy, so
+/// the wing does not blink as other sessions come and go. It switches instantly,
+/// like the badges themselves; a crossfade would need a ticker for a change that
+/// has no in-between.
+///
+/// It is drawn as vector paths so it stays crisp at every angle, like the
+/// menubar's spinner, but it is deliberately **not** that spinner. The menubar's
+/// is a solid disc with a wedge knocked out of it — the same filled-disc-plus-
+/// knocked-out-mark construction as the `checkmark.circle.fill` it replaces — and
+/// every badge glyph on this pill is a filled disc too. A filled disc here would
+/// be an oversized copy of the orange badge beside it, i.e. a badge that lost its
+/// number. A hollow ring with a gap is a different shape class: it reads as
+/// "working" at a glance, it lets the pill's black through the middle of it,
+/// and it cannot be mistaken for a badge.
+///
+/// **Its size is exactly the badge glyph's.** The ring is 12pt across on a 32pt pill and the
+/// glyph beside it is 11pt of SF Symbol whose ink measures **12.00 × 12.00pt** inside its 14pt image
+/// box (`IslandMarkerGroup.widestGlyphWidth`) — so the two silhouettes are the same size to the
+/// measurement, which is the requirement: they are neighbours in the same wing, and a 2pt difference
+/// between neighbours shows. The harness measures both boxes off one render of the pill and asserts
+/// they agree to 0.3pt (`silhouetteMatch`); the measure is the silhouette's **extent**, and it has
+/// to be, because a filled symbol's outermost sliver is a low-coverage skirt that a strict cut-off
+/// trims (it then reports 11.0–11.25) while a stroked ring's harder edge does not (still 12.00).
+/// That is rim density, not size — an earlier note here read the strict number as the size and
+/// claimed the ring was "0.75pt larger as drawn", which is wrong. (It is not inflated for presence
+/// either: 63pt² of ink against the filled glyph's ~99pt² disc, the right hierarchy for the one mark
+/// on the pill that carries no number, with hue and motion earning the attention. The caps this
+/// replaced were 24pt — 75% of the pill's height, 2.1× a glyph's ink mass, so it read as the pill's
+/// headline while being its least informative element — and then 14pt, which matched the glyphs'
+/// *box* by putting the ring's centre-line on their ink. Every one of those was chosen off a ramp
+/// rendered from this code, now at 11/12/13/14pt: 11 would be 1pt *under* the glyph and its gap
+/// falls to 2.5 stroke widths, so there is nothing to trade.)
+/// CodeIsland buys the same presence with a pixel-art
+/// mascot; that was rejected here because the app has no pixel-art language anywhere else
+/// and a second drawing technique beside the SF Symbols is exactly what produced the
+/// 8pt-dot failure this file records. That failure was a marker at 71% of its neighbours'
+/// size *inside the badge row*, where a badge was expected; this mark is at the glyphs' own
+/// size and on the other side of the cutout, so neither the mismatched-size problem nor the
+/// headline problem applies.
+///
+/// So nothing here is ever hidden — the *motion* is what is gated, and three things
+/// gate it, all read in one place (`shouldPlay`):
+///
+///  1. **something must be running.** With nothing running the ring is drawn, still,
+///     and **there is no timer at all**: that is the user's rule and the CPU rule at
+///     once. A timer to hold a mark still would be a ticker spent on nothing.
+///  2. **Reduce Motion.** `NSWorkspace.accessibilityDisplayShouldReduceMotion` holds
+///     the ring at its resting angle instead of turning it; the tint still says
+///     which of the two states it is, so nothing is lost. This is the choice
+///     CodeIsland makes with its pulsing badge, and the setting is re-read when the
+///     system announces it changed. Nothing in this app honoured it before; the pill
+///     animates in the notch, so it must.
+///  3. **the island must be on screen.** The panel's `present()`/`hide()` are the
+///     only two places the island is ordered in or out, and they set `onScreen`
+///     on the way past — including when the island is switched off or has no
+///     rows — so a ring nobody can see never keeps a timer turning. The tick
+///     re-checks the same flag, so the two cannot drift apart in the other
+///     direction either.
+private final class IslandActivityView: NSView, IslandFlankElement {
+
+    /// The ring's diameter ceiling and the air kept outside it, on every side.
+    ///
+    /// **12pt, so the ring's outer edge lands on a badge glyph's ink.** The badge glyphs are
+    /// 11pt SF Symbols whose ink is a 12pt circle inside a 14pt image box
+    /// (`IslandMarkerGroup.widestGlyphWidth`); the disc the eye sees is that 12pt of ink, so
+    /// a 12pt ring is the same size as the glyph beside it rather than 2pt larger. That is the
+    /// whole requirement: the ring and the running badge sit adjacent in the same wing, and
+    /// the two silhouettes have to match. Nothing else on the pill hangs off this number —
+    /// the flank is derived from it, so the wing and the window's x follow automatically.
+    ///
+    /// **What it costs, measured rather than waved away.** At 12pt with the 2pt stroke floor
+    /// the ring's centre-line is 10pt — narrower than the glyphs' ink circle, which is fine
+    /// because a hollow ring is *judged* by its outer edge when it sits next to a filled disc
+    /// — and the 90° gap leaves 3.0 stroke widths of visible opening, the thinnest of the
+    /// range (it is 3.7 at 14pt, 3.9 at 16–20pt). 3.0 is right at the point where a gap still
+    /// reads as an opening rather than a nick, and a 14pt cap was chosen before precisely to
+    /// keep it comfortable — but the maintainer's eye says the two shapes have to be the same
+    /// size, and that beats gap comfort. If the opening ever looks like a nick, `gapDegrees`
+    /// is the lever (it is a fixed 90°, not a size-dependent table), not the cap.
+    ///
+    /// The mark's diameter is `min(diameterCap, height - 2 * inset)`, so the clamp is only a
+    /// guard for a shorter pill: at 12 it binds on neither surface (32pt notched pill, 24pt
+    /// stand-in capsule), so both draw the ring at exactly 12.
+    static let diameterCap: CGFloat = 12
+    static let inset: CGFloat = 4
+
+    /// The ring has no width constant of its own: it contributes its diameter to the
+    /// flank (`CollapsedContentView.requiredLeftFlankWidth`), the *air* around it comes
+    /// from that flank's clearance budget, and `inset` is what pins its leading edge. A
+    /// separate "ring plus its air" width existed only while the ring had the flank to
+    /// itself, and leaving it here would have been a constant that lied about what the
+    /// flank holds.
+
+    /// The mark's diameter in a pill `height` tall: the ceiling, clamped so it keeps its air
+    /// on a shorter pill. At the shipped ceiling the clamp does not bind on either surface
+    /// (32pt notched pill, 24pt stand-in capsule), so the mark is the same size on both.
+    static func diameter(forHeight height: CGFloat) -> CGFloat {
+        max(0, min(diameterCap, height - 2 * inset))
+    }
+
+    /// The ring's stroke, as a share of its diameter, and a floor under it. A stroke
+    /// proportional to the ring keeps a big one from reading as a hairline outline; the
+    /// floor keeps a small one from reading as a hairline *ring*, which is what the bare
+    /// `0.14 × diameter` gives at the bottom of the useful range (1.7pt at 12pt). 2pt is
+    /// the pill's own line weight — an 11pt semibold digit's stems are ~1.7pt — so a
+    /// floored ring is never thinner than the numbers it sits opposite.
+    static let strokeRatio: CGFloat = 0.14
+    static let strokeFloor: CGFloat = 2.0
+
+    static func strokeWidth(forDiameter diameter: CGFloat) -> CGFloat {
+        max(strokeFloor, diameter * strokeRatio)
+    }
+
+    /// One revolution in 1.2s: 18° per 0.06s tick, clockwise, the direction the
+    /// menubar's spinner turns. The mark shares the menubar's tick interval but not its
+    /// angular step, and that is about the *shape*, not the size: the menubar's spinner
+    /// is a filled disc with a wedge taken out, so its spin reads as a bright flicker,
+    /// while this mark's 90° gap is a large, high-contrast discontinuity that travels the
+    /// whole circumference — at the menubar's 750°/s that gap laps the ring every 0.48s,
+    /// which reads as a warning blink rather than the steady "working" pulse a badge-sized
+    /// status light wants. 300°/s is the classic indeterminate rate and keeps the mark
+    /// quiet, which is its job now that it is no larger than the badges opposite it.
+    static let tickInterval: TimeInterval = 0.06
+    static let stepDegrees: CGFloat = 18
+
+    /// Degrees of the ring left open. A three-quarter ring is the most
+    /// recognisable "working" mark there is, and a hollow ring's gap reads smaller
+    /// than the same angle knocked out of a solid disc.
+    ///
+    /// It stays 90° at every size instead of growing as the ring shrinks, because what has
+    /// to stay legible is the gap *in stroke widths* and the round caps already scale with
+    /// the stroke. Measured on the rendered ring, the opening a 90° gap leaves is **3.0
+    /// stroke widths at the shipped 12pt**, 3.7 at 14pt and 3.9 at 16–20pt. 3.0 is the
+    /// thinnest of the range and sits right at the edge of reading as an opening rather than
+    /// a nick — accepted deliberately, because the ring has to match the size of the glyph
+    /// beside it and 14pt was only ever chosen to keep this number comfortable. Under ~3
+    /// stroke widths it stops reading as an opening at all, which is the floor: if the ring
+    /// shrinks again, widen the gap rather than lower the stroke.
+    static let gapDegrees: CGFloat = 90
+
+    /// Angle the ring rests at when it is not turning. This is the arc's start
+    /// angle, and the gap opens `gapDegrees` counter-clockwise from it, so
+    /// `90 - gapDegrees / 2` centres the gap on 12 o'clock and a still ring is
+    /// symmetric instead of looking stopped at random.
+    static let restingAngle: CGFloat = 90 - gapDegrees / 2
+
+    /// The mark's tint when nothing is running: a dim neutral, so a quiet wing
+    /// still reads as *present* without competing with the badges. It is in the
+    /// same family as the card's subordinate tones (its placeholders are white
+    /// α0.32, its context line α0.5) — and, crucially, it is far enough from
+    /// `runningTint` in both hue and brightness that "running" survives on the tint
+    /// alone when Reduce Motion has taken the rotation away.
+    static let restingTint = NSColor.white.withAlphaComponent(0.40)
+
+    /// Whether a session is running. The caller sets this from the same count that
+    /// fills the orange badge, so the two can only ever agree. It drives both
+    /// channels at once — the tint and the motion — which is what keeps a running
+    /// pill and a quiet one from ever looking the same.
+    var running = false {
+        didSet {
+            guard running != oldValue else { return }
+            // The tint changed, so the mark must be redrawn whether or not it is
+            // also about to start or stop turning.
+            needsDisplay = true
+            updateMotion()
+        }
+    }
+
+    /// The tint the ring takes while something is running. Handed in by the
+    /// collapsed view from its own badge vocabulary
+    /// (`CollapsedContentView.color(for:)`), so the pill still has one place where a
+    /// status becomes a colour — orange on this mark and orange on the running badge
+    /// are the same statement at two levels of detail.
+    var runningTint: NSColor = .systemOrange {
+        didSet { needsDisplay = true }
+    }
+
+    /// What the ring is drawn in: the running tint or the resting one, and nothing
+    /// else — this is the single expression of "which state is the mark in".
+    private var tint: NSColor { running ? runningTint : Self.restingTint }
+
+    /// Whether the island is actually on screen, set by the panel from its own
+    /// visibility — `present()` sets it true, `hide()` false, and those are the only
+    /// two places the panel orders itself in or out. A notification would be more
+    /// indirect and this app has no other window that could hide the island behind
+    /// its back, so the third gate is wired from the one place that knows.
+    var onScreen = false {
+        didSet {
+            guard onScreen != oldValue else { return }
+            updateMotion()
+        }
+    }
+
+    private var angle = IslandActivityView.restingAngle
+    private var timer: Timer?
+    private var workspaceObservers: [NSObjectProtocol] = []
+
+    /// Drawn in the standard, unflipped space, like the menubar's spinner, so the
+    /// same sign of rotation turns both clockwise.
+    override var isFlipped: Bool { false }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // Re-read Reduce Motion when the system says it changed, so turning it on
+        // takes effect without a relaunch. Notifications arrive on the main queue.
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(workspace.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateMotion()
+        })
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    deinit {
+        timer?.invalidate()
+        let workspace = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers { workspace.removeObserver(observer) }
+    }
+
+    /// Width for layout: the mark's own diameter at this height, so a shorter pill
+    /// gets a smaller mark rather than one clipped to the pill's edge.
+    func flankWidth(atHeight height: CGFloat) -> CGFloat {
+        Self.diameter(forHeight: height)
+    }
+
+    /// The three gates on the *motion* — the mark itself is never hidden. Something
+    /// running, motion allowed, and the island actually on screen. `restingAngle` is
+    /// where a ring that is not playing is held (see `updateMotion`).
+    private var shouldPlay: Bool {
+        running
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            && onScreen
+    }
+
+    /// Start or stop the ticker. The only way a timer can come into existence or be
+    /// torn down: it is created when the mark starts playing and invalidated the
+    /// moment it stops, so a quiet pill costs nothing at all — the mark is drawn,
+    /// it just is not moving. This is the CPU rule and the state rule meeting.
+    private func updateMotion() {
+        if shouldPlay {
+            startTicking()
+        } else {
+            stopTicking()
+            // A ring that is not playing — reduced motion, nothing running, or a pill
+            // that has just come back on screen — is put back to its resting angle
+            // rather than left wherever the last tick happened to stop it. A gap
+            // frozen at an arbitrary angle reads as a spinner that has stalled; a
+            // gap centred on 12 o'clock reads as a mark that is deliberately still.
+            if angle != Self.restingAngle {
+                angle = Self.restingAngle
+                needsDisplay = true
+            }
+        }
+    }
+
+    private func startTicking() {
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: Self.tickInterval, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func stopTicking() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    /// One step of the ring, clockwise. Nothing is redrawn once the mark stops
+    /// playing — that is the self-healing half of the third gate, in case the
+    /// visibility flag and the ticker ever disagree.
+    private func tick() {
+        guard shouldPlay else {
+            updateMotion()
+            return
+        }
+        angle = (angle - Self.stepDegrees).truncatingRemainder(dividingBy: 360)
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard case .dot(let color) = marker else { return }
-        color.setFill()
-        NSBezierPath(ovalIn: NSRect(
-            x: 0,
-            y: bounds.midY - Self.dotDiameter / 2,
-            width: Self.dotDiameter,
-            height: Self.dotDiameter
-        )).fill()
+        let diameter = Self.diameter(forHeight: bounds.height)
+        guard diameter > 0 else { return }
+        let lineWidth = Self.strokeWidth(forDiameter: diameter)
+        let radius = (diameter - lineWidth) / 2
+        let center = NSPoint(x: bounds.midX, y: bounds.midY)
+        let ring = NSBezierPath()
+        ring.appendArc(
+            withCenter: center,
+            radius: radius,
+            startAngle: angle,
+            endAngle: angle - (360 - Self.gapDegrees),
+            clockwise: true
+        )
+        ring.lineWidth = lineWidth
+        ring.lineCapStyle = .round
+        tint.setStroke()
+        ring.stroke()
     }
 }
 
