@@ -8,7 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastSessions: [SessionInfo]? = nil
     private var currentState = AppState()
     private var bubble: StatusBubble!
-    private var island: IslandPanel!
+    private var island: IslandHost!
     private var spinnerTimer: Timer?
     private var spinnerAngle: CGFloat = 0
     private var busyMenuItems: [NSMenuItem] = []
@@ -68,7 +68,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.render(state)
         }
         bubble = StatusBubble()
-        island = IslandPanel()
+        // One island per attached screen; the host owns the set and fans the
+        // same rows out to all of them.
+        island = IslandHost()
         island.onSelectSession = { [weak self] pid in
             self?.monitor.focusSession(pid: pid)
         }
@@ -265,23 +267,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return stored
     }
 
-    private enum ContextDisplay: String, CaseIterable {
-        case percent
-        case tokens
-        case both
-
-        var displayName: String {
-            switch self {
-            case .percent: return "Percent"
-            case .tokens: return "Tokens used"
-            case .both: return "Percent + tokens"
-            }
-        }
-    }
-
-    private var contextUsageDisplay: ContextDisplay {
+    private var contextUsageDisplay: ContextDisplayMode {
         guard let raw = UserDefaults.standard.string(forKey: contextUsageDisplayKey),
-              let display = ContextDisplay(rawValue: raw) else { return .both }
+              let display = ContextDisplayMode(rawValue: raw) else { return .both }
         return display
     }
 
@@ -305,7 +293,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         submenu.addItem(toggle)
         submenu.addItem(.separator())
 
-        for (index, display) in ContextDisplay.allCases.enumerated() {
+        for (index, display) in ContextDisplayMode.allCases.enumerated() {
             let item = NSMenuItem(title: display.displayName, action: #selector(contextUsageDisplaySelected(_:)), keyEquivalent: "")
             item.target = self
             item.tag = index
@@ -342,7 +330,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func contextUsageDisplaySelected(_ sender: NSMenuItem) {
-        let all = ContextDisplay.allCases
+        let all = ContextDisplayMode.allCases
         guard all.indices.contains(sender.tag) else { return }
         UserDefaults.standard.set(all[sender.tag].rawValue, forKey: contextUsageDisplayKey)
         render(currentState, forceMenuRefresh: true)
@@ -390,59 +378,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .foregroundColor: NSColor.tertiaryLabelColor
         ]
 
-        guard let context = session.context else {
-            item.attributedTitle = NSAttributedString(string: "Context — no completed turn yet", attributes: unknownAttributes)
+        // Thresholds, wording, banding: all shared with the island row via
+        // ContextUsagePresentation, so the two surfaces cannot drift.
+        let presentation = contextPresentation(for: session)
+
+        switch presentation.content {
+        case .placeholder(let text):
+            item.attributedTitle = NSAttributedString(string: text, attributes: unknownAttributes)
             item.image = contextDetailImage(glyph: nil, color: .tertiaryLabelColor, width: badgeWidth)
             return item
-        }
-        guard let limit = context.limit else {
-            item.attributedTitle = NSAttributedString(string: "Context unknown — model limit unavailable", attributes: unknownAttributes)
-            item.image = contextDetailImage(glyph: nil, color: .tertiaryLabelColor, width: badgeWidth)
+        case .usage(let tokensText, let percentText):
+            let bandColor = presentation.band.menuColor
+            // Semibold percent is a redundant, colour-independent cue that only
+            // applies inside a band (warn or critical).
+            let inBand = presentation.band.inBand
+            let percentFont = inBand ? NSFont.systemFont(ofSize: baseFont.pointSize, weight: .semibold) : baseFont
+            let normalAttributes: [NSAttributedString.Key: Any] = [.font: baseFont, .foregroundColor: bandColor]
+            let percentAttributes: [NSAttributedString.Key: Any] = [.font: percentFont, .foregroundColor: bandColor]
+
+            let title = NSMutableAttributedString()
+            switch contextUsageDisplay {
+            case .percent:
+                title.append(NSAttributedString(string: percentText, attributes: percentAttributes))
+            case .tokens:
+                title.append(NSAttributedString(string: tokensText, attributes: normalAttributes))
+            case .both:
+                title.append(NSAttributedString(string: "\(tokensText) · ", attributes: normalAttributes))
+                title.append(NSAttributedString(string: percentText, attributes: percentAttributes))
+            }
+            item.attributedTitle = title
+            item.image = contextDetailImage(glyph: presentation.band.glyph, color: bandColor, width: badgeWidth)
             return item
         }
-
-        let pct: Int
-        if let fraction = context.fraction {
-            pct = min(100, max(0, Int((fraction * 100).rounded())))
-        } else {
-            pct = min(100, max(0, Int((Double(context.used) / Double(limit) * 100).rounded())))
-        }
-
-        let bandColor: NSColor
-        let bandGlyph: String?
-        if pct >= contextUsageCritical {
-            bandColor = .systemRed
-            bandGlyph = "exclamationmark.octagon.fill"
-        } else if pct >= contextUsageWarn {
-            bandColor = .systemOrange
-            bandGlyph = "exclamationmark.triangle.fill"
-        } else {
-            bandColor = .labelColor
-            bandGlyph = nil
-        }
-
-        let tokensText = "\(compactTokens(context.used)) / \(compactTokens(limit)) tokens"
-        let percentText = "\(pct)%"
-        // Semibold percent is a redundant, colour-independent cue that only
-        // applies inside a band (warn or critical).
-        let inBand = bandGlyph != nil
-        let percentFont = inBand ? NSFont.systemFont(ofSize: baseFont.pointSize, weight: .semibold) : baseFont
-        let normalAttributes: [NSAttributedString.Key: Any] = [.font: baseFont, .foregroundColor: bandColor]
-        let percentAttributes: [NSAttributedString.Key: Any] = [.font: percentFont, .foregroundColor: bandColor]
-
-        let title = NSMutableAttributedString()
-        switch contextUsageDisplay {
-        case .percent:
-            title.append(NSAttributedString(string: percentText, attributes: percentAttributes))
-        case .tokens:
-            title.append(NSAttributedString(string: tokensText, attributes: normalAttributes))
-        case .both:
-            title.append(NSAttributedString(string: "\(tokensText) · ", attributes: normalAttributes))
-            title.append(NSAttributedString(string: percentText, attributes: percentAttributes))
-        }
-        item.attributedTitle = title
-        item.image = contextDetailImage(glyph: bandGlyph, color: bandColor, width: badgeWidth)
-        return item
     }
 
     /// A fixed-width leading badge for the detail row. Its width equals a
@@ -464,17 +431,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Compact token formatter: `1_234 → "1.2k"`, `32_000 → "32k"`, ≥1M → `"1M"`.
-    private func compactTokens(_ value: Int) -> String {
-        if value >= 1_000_000 {
-            let millions = Double(value) / 1_000_000
-            return millions == millions.rounded() ? "\(Int(millions))M" : String(format: "%.1fM", millions)
-        }
-        if value >= 1_000 {
-            let thousands = Double(value) / 1_000
-            return thousands == thousands.rounded() ? "\(Int(thousands))k" : String(format: "%.1fk", thousands)
-        }
-        return "\(value)"
+    /// Thresholds, wording and banding for one session's context usage — the
+    /// same values the menubar detail row is built from.
+    private func contextPresentation(for session: SessionInfo) -> ContextUsagePresentation {
+        ContextUsagePresentation(
+            context: session.context,
+            warn: contextUsageWarn,
+            critical: contextUsageCritical
+        )
     }
 
     private func projectsShownMenu() -> NSMenuItem {
@@ -717,19 +681,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         render(currentState, forceMenuRefresh: true)
     }
 
-    /// Rows handed to the island: the same disambiguated names, status and age
-    /// the dropdown uses, so the island and the menu tell the same story.
+    /// Rows handed to the island: the same status and age the dropdown uses, plus
+    /// the folder name and the session title's leading part on line 1, and the
+    /// context-usage line when that feature is on — again built from the same
+    /// presentation the dropdown's detail row uses.
     private func islandRows(for sessions: [SessionInfo]) -> [IslandRow] {
         let nowMS = Date().timeIntervalSince1970 * 1000
-        let names = disambiguatedNames(for: sessions)
+        let names = islandRowNames(for: sessions, showTitles: showSessionTitles)
         return sessions.map { session in
-            IslandRow(
-                name: names[session.id] ?? sessionName(for: session),
+            let naming = names[session.id]
+                ?? IslandRowName(name: sessionFolderName(for: session), title: nil)
+            return IslandRow(
+                name: naming.name,
+                title: naming.title,
                 status: session.status,
                 duration: showSessionTime ? formatDurationLabel(sinceMS: session.createdAt, nowMS: nowMS) : "",
-                pid: session.clientPID
+                pid: session.clientPID,
+                context: islandContext(for: session)
             )
         }
+    }
+
+    /// The island's context line for one session, or nil when the feature is
+    /// off — in which case the island row renders exactly as it did before
+    /// context usage existed. Reads no endpoint itself: it reuses the value the
+    /// monitor already filled (throttled to 2s per session).
+    private func islandContext(for session: SessionInfo) -> IslandContext? {
+        guard contextUsageEnabled else { return nil }
+        let presentation = contextPresentation(for: session)
+        return IslandContext(
+            text: presentation.displayText(contextUsageDisplay),
+            glyph: presentation.band.glyph,
+            band: presentation.band
+        )
     }
 
     private func menuLabel(_ text: String) -> NSMenuItem {
@@ -847,11 +831,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return sessions.map { names[$0.id] ?? sessionName(for: $0) }.joined(separator: ", ")
     }
 
+    /// The folder a session belongs to, shared with the island's line-1 naming so
+    /// the two surfaces agree on it. See `sessionFolderName`.
     private func sessionName(for session: SessionInfo) -> String {
-        if !session.projectDir.isEmpty && session.projectDir != "/" {
-            return URL(fileURLWithPath: session.projectDir).lastPathComponent
-        }
-        return session.id.isEmpty ? "session" : String(session.id.suffix(6))
+        sessionFolderName(for: session)
     }
 
     // Several live sessions can share one project folder, which would otherwise
@@ -876,11 +859,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func sessionDisambiguator(for session: SessionInfo) -> String {
-        if showSessionTitles {
-            let title = (session.sessionTitle ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !title.isEmpty {
-                return truncated(title, limit: 24)
-            }
+        // One shared "display title" — same cleaning the island's title field
+        // gets, so the two surfaces never disagree about what a title is.
+        if showSessionTitles, let title = flattenedSessionTitle(session) {
+            return truncated(title, limit: 24)
         }
         let tail = session.id.suffix(6)
         return tail.isEmpty ? "session" : String(tail)
