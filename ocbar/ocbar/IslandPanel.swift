@@ -10,9 +10,10 @@ struct IslandRow {
 
 /// CodeIsland-style "Dynamic Island" surface: a borderless, non-activating
 /// panel pinned to the very top edge of the target screen. Collapsed it hides
-/// inside the notch (or in a small pill on notch-less displays) and shows one
-/// small status dot per session; on hover it drops an expanded card listing
-/// every session.
+/// inside the notch (or in a small pill on notch-less displays) and carries two
+/// self-explanatory readouts, one per flank: a dot with the number of running
+/// sessions on the left, and the most urgent non-running state with its own
+/// count on the right. On hover it drops an expanded card listing every session.
 ///
 /// Everything is drawn black-and-white regardless of the system appearance,
 /// because the collapsed pill stands in for the physical notch.
@@ -89,7 +90,7 @@ final class IslandPanel {
     private let rowInset: CGFloat = 8
     private let bottomPadding: CGFloat = 8
     private let expandedCornerRadius: CGFloat = 18
-    private let notchFlank: CGFloat = 30
+    private let notchFlank: CGFloat = 41
     private let plainCollapsedWidth: CGFloat = 200
     private let plainCollapsedHeight: CGFloat = 24
 
@@ -217,7 +218,6 @@ final class IslandPanel {
 
         let collapsed = CollapsedContentView(frame: card.bounds)
         collapsed.autoresizingMask = [.width, .height]
-        collapsed.flank = notchFlank
         card.addSubview(collapsed)
 
         panel.contentView = card
@@ -255,13 +255,34 @@ final class IslandPanel {
         }
     }
 
-    /// The collapsed pill's content: one status dot per session, most urgent
-    /// first, rather than a single aggregate dot plus a bare count. The count
-    /// was meaningless — the notch splits the pill in half, so the digit read
-    /// as a stray number with no legend. A strip of coloured dots is countable
-    /// on its own and the colour already carries the state.
+    /// The collapsed pill's two readouts: how many sessions are running (left)
+    /// and the single most urgent non-running state with its own count (right).
+    /// A combined total would misreport the state, so the non-running states are
+    /// ranked error > waiting > idle and only the winner is shown. Cheap: the
+    /// collapsed view relayouts only when a count or the winning state changes.
     private func refreshCollapsed() {
-        collapsedView?.sessionStatuses = rows.map(\.status)
+        var busy = 0
+        var waiting = 0
+        var idle = 0
+        var errors = 0
+        for row in rows {
+            switch row.status {
+            case .busy: busy += 1
+            case .waiting: waiting += 1
+            case .idle: idle += 1
+            case .error: errors += 1
+            }
+        }
+        collapsedView?.busyCount = busy
+        if errors > 0 {
+            collapsedView?.attention = CollapsedContentView.Attention(status: .error, count: errors)
+        } else if waiting > 0 {
+            collapsedView?.attention = CollapsedContentView.Attention(status: .waiting, count: waiting)
+        } else if idle > 0 {
+            collapsedView?.attention = CollapsedContentView.Attention(status: .idle, count: idle)
+        } else {
+            collapsedView?.attention = nil
+        }
     }
 
     // MARK: - Show / hide
@@ -328,7 +349,6 @@ final class IslandPanel {
 
         collapsedView.notched = metrics.notched
         collapsedView.notchWidth = metrics.notchWidth
-        collapsedView.flank = notchFlank
 
         let collapsedAlpha: CGFloat = expanded ? 0 : 1
         let rowsAlpha: CGFloat = expanded ? 1 : 0
@@ -507,92 +527,88 @@ private final class IslandCardView: NSView {
 
 // MARK: - Collapsed content
 
-/// The collapsed pill's content: one small status dot per session, split
-/// across the two flanks of the physical cutout — the notch has no pixels, so
-/// nothing may be drawn across the middle of the pill. Dots are ordered
-/// most-urgent-first (error, waiting, idle, busy) so truncation drops the least
-/// urgent, and a fifth slot is never needed: with more than four sessions the
-/// last slot becomes a neutral ellipsis. Colour carries the state and the strip
-/// is countable, so no legend and no digit are required.
+/// The collapsed pill's content, split across the two flanks of the physical
+/// cutout — the notch has no pixels, so nothing may be drawn across the middle
+/// of the pill. Each flank carries one small, self-explanatory group: left is a
+/// filled orange dot plus the number of *running* (busy) sessions, right is the
+/// most urgent *non-running* state's tinted glyph plus its own count. Left
+/// answers "how many are working", right answers "what needs me"; a bare digit
+/// was meaningless, the marker is what gives it meaning.
 private final class CollapsedContentView: NSView {
-    /// The per-session statuses, in the order the panel reports them.
-    var sessionStatuses: [SessionStatus] = [] {
-        didSet { if sessionStatuses != oldValue { rebuildSlots() } }
+
+    /// The most urgent non-busy state on show, with its own count.
+    struct Attention: Equatable {
+        let status: SessionStatus
+        let count: Int
     }
+
+    /// Busy sessions counted on the left flank. Zero hides the whole group.
+    var busyCount: Int = 0 {
+        didSet {
+            guard busyCount != oldValue else { return }
+            leftGroup.number = busyCount
+            leftGroup.isHidden = busyCount == 0
+            needsLayout = true
+        }
+    }
+
+    /// Most urgent non-running state on the right flank. All-busy hides the
+    /// whole group — the "quiet while working" case.
+    var attention: Attention? {
+        didSet {
+            guard attention != oldValue else { return }
+            applyAttention()
+            needsLayout = true
+        }
+    }
+
     var notched = false {
         didSet { if notched != oldValue { needsLayout = true } }
     }
     var notchWidth: CGFloat = 0 {
         didSet { if notchWidth != oldValue { needsLayout = true } }
     }
-    var flank: CGFloat = 30
 
-    /// Beyond this many sessions the last slot turns into an ellipsis.
-    private static let maxSlots = 4
-    private let slotSize: CGFloat = 9
-    private let slotGap: CGFloat = 6
-
-    /// `color == nil` means the slot is the ellipsis rather than a session.
-    private struct Slot {
-        let color: NSColor?
-    }
-
-    private var slots: [Slot] = []
-    private var slotViews: [IslandDotView] = []
+    private let leftGroup = IslandMarkerGroup(frame: .zero)
+    private let rightGroup = IslandMarkerGroup(frame: .zero)
 
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        leftGroup.marker = .dot(.systemOrange)
+        leftGroup.isHidden = true
+        rightGroup.isHidden = true
+        addSubview(leftGroup)
+        addSubview(rightGroup)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not used")
     }
 
-    // MARK: Slots
-
-    private func rebuildSlots() {
-        let ordered = sessionStatuses.enumerated()
-            .sorted { lhs, rhs in
-                let a = Self.urgency(lhs.element)
-                let b = Self.urgency(rhs.element)
-                // Ties keep their incoming order, so the strip is stable while
-                // statuses stay put and rows do not shuffle between poll ticks.
-                return a == b ? lhs.offset < rhs.offset : a < b
-            }
-            .map(\.element)
-
-        // Three most urgent dots plus "…": the least urgent sessions are the
-        // ones a fourth dot would have to drop anyway.
-        let clipped = ordered.count > Self.maxSlots
-        let shown = clipped ? Array(ordered.prefix(Self.maxSlots - 1)) : ordered
-        var built = shown.map { Slot(color: Self.color(for: $0)) }
-        if clipped { built.append(Slot(color: nil)) }
-        slots = built
-
-        while slotViews.count < built.count {
-            let view = IslandDotView(frame: .zero)
-            addSubview(view)
-            slotViews.append(view)
+    private func applyAttention() {
+        guard let attention else {
+            rightGroup.isHidden = true
+            return
         }
-        while slotViews.count > built.count {
-            slotViews.removeLast().removeFromSuperview()
+        rightGroup.number = attention.count
+        if let image = islandSymbolImage(
+            symbol: Self.symbol(for: attention.status),
+            color: Self.color(for: attention.status),
+            pointSize: 11
+        ) {
+            rightGroup.marker = .glyph(image)
         }
-        for (view, slot) in zip(slotViews, built) {
-            view.isEllipsis = slot.color == nil
-            if let color = slot.color { view.dotColor = color }
-        }
-        needsLayout = true
+        rightGroup.isHidden = false
     }
 
-    /// Leftmost slot is the most urgent, so it survives truncation longest.
-    private static func urgency(_ status: SessionStatus) -> Int {
+    private static func symbol(for status: SessionStatus) -> String {
         switch status {
-        case .error: return 0
-        case .waiting: return 1
-        case .idle: return 2
-        case .busy: return 3
+        case .busy: return "arrow.clockwise.circle.fill"
+        case .waiting: return "questionmark.circle.fill"
+        case .idle: return "checkmark.circle.fill"
+        case .error: return "exclamationmark.triangle.fill"
         }
     }
 
@@ -607,77 +623,132 @@ private final class CollapsedContentView: NSView {
 
     override func layout() {
         super.layout()
-        guard !slotViews.isEmpty else { return }
+        // The pill is centred on the screen and, near enough, so is the notch,
+        // so the middle of the pill is treated as the cutout: each group sits
+        // centred inside its own flank and never crosses the middle.
+        let split = notched && notchWidth > 0 && bounds.width > notchWidth
+        let notchOrigin = split ? (bounds.width - notchWidth) / 2 : bounds.width / 2
+        let notchEnd = split ? notchOrigin + notchWidth : notchOrigin
 
-        // The pill is centred on the screen and so is the notch, so the two
-        // visible flanks are treated as equal; the dots sit centred inside
-        // them with a few points of clearance. Flush against the cutout would
-        // clip the outermost dot on the right, which is the narrower flank.
-        let split = notched && notchWidth > 0 && bounds.width > notchWidth + slotSize
-        let leftCount = split ? (slotViews.count + 1) / 2 : slotViews.count
-        let rightCount = split ? slotViews.count - leftCount : 0
-
-        var origins: [CGFloat] = []
-        if split {
-            let regionWidth = max((bounds.width - notchWidth) / 2, flank)
-            origins += slotOrigins(count: leftCount, regionOrigin: 0, regionWidth: regionWidth)
-            origins += slotOrigins(
-                count: rightCount,
-                regionOrigin: regionWidth + notchWidth,
-                regionWidth: regionWidth
-            )
-        } else {
-            origins += slotOrigins(count: leftCount, regionOrigin: 0, regionWidth: bounds.width)
+        if !leftGroup.isHidden {
+            leftGroup.frame = centeredFrame(for: leftGroup, minX: 0, maxX: notchOrigin)
         }
-
-        let y = bounds.midY - slotSize / 2
-        for (index, view) in slotViews.enumerated() where index < origins.count {
-            view.frame = NSRect(x: origins[index], y: y, width: slotSize, height: slotSize)
+        if !rightGroup.isHidden {
+            rightGroup.frame = centeredFrame(for: rightGroup, minX: notchEnd, maxX: bounds.width)
         }
     }
 
-    /// Left edges of `count` equally spaced slots, centred within the region.
-    private func slotOrigins(count: Int, regionOrigin: CGFloat, regionWidth: CGFloat) -> [CGFloat] {
-        guard count > 0 else { return [] }
-        let strip = CGFloat(count) * slotSize + CGFloat(count - 1) * slotGap
-        let start = regionOrigin + (regionWidth - strip) / 2
-        return (0..<count).map { start + CGFloat($0) * (slotSize + slotGap) }
+    /// Centre a group in its flank, keeping a symmetric clearance from both the
+    /// cutout edge and the pill edge.
+    private func centeredFrame(for group: IslandMarkerGroup, minX: CGFloat, maxX: CGFloat) -> NSRect {
+        let width = group.groupWidth
+        let x = minX + (maxX - minX - width) / 2
+        return NSRect(x: x.rounded(), y: 0, width: width, height: bounds.height)
     }
 }
 
-/// A single slot in the collapsed strip: a filled status dot, or the neutral
-/// ellipsis shown when there are more sessions than slots. Draws itself so a
-/// colour change needs no image.
-private final class IslandDotView: NSView {
-    var dotColor: NSColor = .systemGray {
-        didSet { if dotColor != oldValue { needsDisplay = true } }
+/// One flank of the collapsed pill: a small marker followed by the number of
+/// sessions it counts. The left group's marker is a plain filled dot — "how
+/// many are working" — while the right group's is a tinted SF Symbol — "what
+/// needs me". The number uses tabular digits so the group's width does not
+/// jitter as the count changes.
+private final class IslandMarkerGroup: NSView {
+
+    enum Marker {
+        case empty
+        case dot(NSColor)
+        case glyph(NSImage)
     }
-    var isEllipsis = false {
-        didSet { if isEllipsis != oldValue { needsDisplay = true } }
+
+    var marker: Marker = .empty {
+        didSet { applyMarker() }
+    }
+    var number: Int = 0 {
+        didSet {
+            guard number != oldValue else { return }
+            numberLabel.stringValue = "\(number)"
+            needsLayout = true
+        }
+    }
+
+    private let dotDiameter: CGFloat = 8
+    private let gap: CGFloat = 4.5
+
+    private let numberLabel = NSTextField(labelWithString: "0")
+    private let glyphView = NSImageView()
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        numberLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        numberLabel.textColor = NSColor.white.withAlphaComponent(0.92)
+        addSubview(numberLabel)
+        glyphView.imageScaling = .scaleProportionallyDown
+        glyphView.isHidden = true
+        addSubview(glyphView)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    /// Full width of the group: marker, gap, digits.
+    var groupWidth: CGFloat {
+        if case .empty = marker { return 0 }
+        return markerWidth + gap + numberLabel.intrinsicContentSize.width
+    }
+
+    private var markerWidth: CGFloat {
+        switch marker {
+        case .empty: return 0
+        case .dot: return dotDiameter
+        case .glyph(let image): return image.size.width
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        let labelSize = numberLabel.intrinsicContentSize
+        numberLabel.frame = NSRect(
+            x: markerWidth + gap,
+            y: (bounds.height - labelSize.height) / 2,
+            width: labelSize.width,
+            height: labelSize.height
+        )
+        if case .glyph(let image) = marker {
+            glyphView.frame = NSRect(
+                x: 0,
+                y: (bounds.height - image.size.height) / 2,
+                width: image.size.width,
+                height: image.size.height
+            )
+        }
+    }
+
+    private func applyMarker() {
+        switch marker {
+        case .empty:
+            glyphView.isHidden = true
+        case .dot:
+            glyphView.isHidden = true
+            needsDisplay = true
+        case .glyph(let image):
+            glyphView.image = image
+            glyphView.isHidden = false
+        }
+        needsLayout = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard isEllipsis else {
-            dotColor.setFill()
-            NSBezierPath(ovalIn: bounds).fill()
-            return
-        }
-        // Three tiny dots reading as "…" — a text glyph would be fussier at
-        // this size and would not sit on the same optical baseline as the dots.
-        NSColor.tertiaryLabelColor.setFill()
-        let radius: CGFloat = 1.2
-        let gap: CGFloat = 0.9
-        let strip = radius * 6 + gap * 2
-        var x = bounds.midX - strip / 2 + radius
-        for _ in 0..<3 {
-            NSBezierPath(ovalIn: NSRect(
-                x: x - radius,
-                y: bounds.midY - radius,
-                width: radius * 2,
-                height: radius * 2
-            )).fill()
-            x += radius * 2 + gap
-        }
+        guard case .dot(let color) = marker else { return }
+        color.setFill()
+        NSBezierPath(ovalIn: NSRect(
+            x: 0,
+            y: bounds.midY - dotDiameter / 2,
+            width: dotDiameter,
+            height: dotDiameter
+        )).fill()
     }
 }
 
