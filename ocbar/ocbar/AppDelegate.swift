@@ -1,6 +1,43 @@
 import AppKit
 import UserNotifications
 
+// <menubar-title-shape>
+// The sentinel comments around this block are load-bearing: an out-of-tree
+// harness extracts the bytes between them and compiles this AppKit-free piece
+// standalone, so the title decision can be asserted without a status item.
+// Anything added inside must stay free of AppKit.
+/// Which shape the menubar status item takes. Decided purely from the session
+/// count and the two toggles, so the choice can be driven outside AppKit.
+/// `appName` is the plain "ocbar" label used when project names are off but the
+/// island is on and therefore already carrying the per-status detail.
+enum MenubarTitleShape: Equatable {
+    case empty
+    case appName
+    case aggregate
+    case named
+    case folded
+}
+
+func menubarTitleShape(sessionCount: Int, projectsShown: Int, islandEnabled: Bool) -> MenubarTitleShape {
+    if sessionCount == 0 { return .empty }
+    if projectsShown == 0 { return islandEnabled ? .appName : .aggregate }
+    return sessionCount <= projectsShown ? .named : .folded
+}
+
+/// VoiceOver summary for the glyph + count vocabulary ("2 busy, 1 waiting"),
+/// ordered most urgent first. Shared by `aggregateTitle` and the plain "ocbar"
+/// title, which drops the visible counts but must keep the spoken state.
+func aggregateSummary(statuses: [String]) -> String {
+    var parts: [String] = []
+    for status in ["error", "busy", "waiting", "idle"] {
+        let count = statuses.filter { $0 == status }.count
+        guard count > 0 else { continue }
+        parts.append("\(count) \(status)")
+    }
+    return parts.joined(separator: ", ")
+}
+// </menubar-title-shape>
+
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var monitor: SessionMonitor!
@@ -142,8 +179,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ]
 
         let total = state.sessions.count
+        let shape = menubarTitleShape(sessionCount: total, projectsShown: projectsShown, islandEnabled: islandEnabled)
         var accessibility: String
-        if total == 0 {
+
+        switch shape {
+        case .empty:
             button.image = nil
             // No sessions: glyph only. The status item shrinks to a bare dot —
             // the same dot-plus-name grammar the populated states use, minus a
@@ -156,7 +196,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             currentButtonTitle = nil
             button.attributedTitle = NSAttributedString(string: "", attributes: attrs)
             accessibility = "No OpenCode sessions"
-        } else if projectsShown == 0 {
+        case .appName:
+            // Project names are off but the island is on, so the island already
+            // shows the per-status detail; the menubar drops to the bare app
+            // name. The visible glyphs and counts are gone, so VoiceOver keeps
+            // the spoken state summary rather than reading just "ocbar".
+            button.image = nil
+            let title = NSAttributedString(string: "ocbar", attributes: attrs)
+            busyTitleAttachments = []
+            currentButtonTitle = title
+            button.attributedTitle = title
+            accessibility = aggregateSummary(statuses: state.sessions.map { $0.status.rawValue })
+        case .aggregate:
             // No names at all: one glyph + count per status that has sessions.
             // Same status vocabulary the menu rows and the island use, and the
             // glyphs alone are otherwise invisible to VoiceOver.
@@ -166,14 +217,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             currentButtonTitle = built.title
             button.attributedTitle = built.title
             accessibility = built.summary
-        } else if total <= projectsShown {
+        case .named:
             button.image = nil
             let built = sessionTitle(for: state.sessions, attributes: attrs)
             busyTitleAttachments = built.busyAttachments
             currentButtonTitle = built.title
             button.attributedTitle = built.title
             accessibility = spokenNames(for: state.sessions)
-        } else {
+        case .folded:
             button.image = nil
             let built = foldedTitle(for: state.sessions, attributes: attrs)
             busyTitleAttachments = built.busyAttachments
@@ -800,7 +851,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
         let title = NSMutableAttributedString()
         var busyAttachments: [NSTextAttachment] = []
-        var spoken: [String] = []
 
         for status in [SessionStatus.error, .busy, .waiting, .idle] {
             let count = sessions.filter { $0.status == status }.count
@@ -819,10 +869,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if status == .busy { busyAttachments.append(attachment) }
             }
             title.append(NSAttributedString(string: " \(count)", attributes: attributes))
-            spoken.append("\(count) \(status.rawValue)")
         }
 
-        return (title, busyAttachments, spoken.joined(separator: ", "))
+        return (title, busyAttachments, aggregateSummary(statuses: sessions.map { $0.status.rawValue }))
     }
 
     /// VoiceOver text for the menubar item while it renders project names.
