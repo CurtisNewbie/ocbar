@@ -14,6 +14,15 @@ class SessionMonitor {
     private var previousStatus: [String: SessionStatus] = [:]
     private var previousDir: [String: String] = [:]
     private var sessionIDToPID: [String: Int32] = [:]
+    /// Per-model usable context ceiling, keyed by "providerID/id". A missing key
+    /// means the model's limit info is unknown (=> nil display limit).
+    private var modelUsable: [String: Int] = [:]
+    private var modelUsableFetchedAt: Date?
+    private let modelUsableTTL: TimeInterval = 300
+    /// Last computed context usage per session, with the fetch time, so the
+    /// 0.5s poll does not re-fetch each time.
+    private var contextCache: [String: (ctx: SessionContext, fetchedAt: Date)] = [:]
+    private let contextRefreshInterval: TimeInterval = 2
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
@@ -153,6 +162,8 @@ class SessionMonitor {
             sessions.removeAll { supersededIDs.contains($0.id) }
         }
 
+        await fillContext(for: &sessions, endpoint: endpoint)
+
         publish(sessions: sessions)
     }
 
@@ -206,6 +217,121 @@ class SessionMonitor {
             }
         }
         return waiting
+    }
+
+    // MARK: - Context-window usage
+
+    /// Feature gate; default off. Reads `UserDefaults` directly so it reflects
+    /// toggles without an app restart.
+    private var contextUsageEnabled: Bool {
+        (UserDefaults.standard.object(forKey: "ocbar.contextUsage") as? Bool) ?? false
+    }
+
+    /// Fill each visible session's `context` before publishing. Only runs when
+    /// enabled; the `/api/model` map is TTL-cached and each session is refreshed
+    /// at most every `contextRefreshInterval` seconds.
+    private func fillContext(for sessions: inout [SessionInfo], endpoint: ServiceEndpoint) async {
+        guard contextUsageEnabled, !sessions.isEmpty else {
+            contextCache.removeAll()
+            return
+        }
+
+        let usableByKey = await modelUsableMap(endpoint: endpoint)
+        let now = Date()
+
+        for i in sessions.indices {
+            let id = sessions[i].id
+            if let cached = contextCache[id], now.timeIntervalSince(cached.fetchedAt) < contextRefreshInterval {
+                sessions[i].context = cached.ctx
+            } else if let ctx = await fetchContext(endpoint: endpoint, sessionID: id, usableByKey: usableByKey) {
+                contextCache[id] = (ctx, now)
+                sessions[i].context = ctx
+            } else {
+                // Unknown this round: keep the last known value (or nil).
+                sessions[i].context = contextCache[id]?.ctx
+            }
+        }
+
+        // Drop cache entries for sessions that are no longer visible.
+        let visible = Set(sessions.map(\.id))
+        contextCache = contextCache.filter { visible.contains($0.key) }
+    }
+
+    /// Usable context ceiling per model key ("providerID/id"), TTL-cached.
+    /// A missing key means the model's limit info is unknown.
+    private func modelUsableMap(endpoint: ServiceEndpoint) async -> [String: Int] {
+        if let fetched = modelUsableFetchedAt, Date().timeIntervalSince(fetched) < modelUsableTTL {
+            return modelUsable
+        }
+        guard let json = await getJSON(endpoint: endpoint, path: "api/model") as? [String: Any],
+              let data = json["data"] as? [[String: Any]] else {
+            // Keep the last known map on failure; don't stamp the TTL.
+            return modelUsable
+        }
+        var map: [String: Int] = [:]
+        for m in data {
+            guard let providerID = m["providerID"] as? String,
+                  let id = m["id"] as? String else { continue }
+            let limit = m["limit"] as? [String: Any]
+            let usable = Self.usableCeiling(
+                context: (limit?["context"] as? NSNumber)?.intValue,
+                input: (limit?["input"] as? NSNumber)?.intValue,
+                output: (limit?["output"] as? NSNumber)?.intValue)
+            if let usable { map["\(providerID)/\(id)"] = usable }
+        }
+        modelUsable = map
+        modelUsableFetchedAt = Date()
+        return map
+    }
+
+    /// Usable context ceiling, mirroring opencode's
+    /// `packages/opencode/src/session/overflow.ts`:
+    ///   mx = min(output ?? 32000, 32000); reserved = min(20000, mx)
+    ///   usable = (input != nil) ? max(0, input - reserved) : max(0, context - mx)
+    private static func usableCeiling(context: Int?, input: Int?, output: Int?) -> Int? {
+        if input == nil && context == nil { return nil }
+        let outputTokenMax = 32000
+        let mx = min(output ?? outputTokenMax, outputTokenMax)
+        let reserved = min(20000, mx)
+        if let input { return max(0, input - reserved) }
+        return max(0, (context ?? 0) - mx)
+    }
+
+    /// Fetch one session's context usage from its newest completed assistant
+    /// turn. Returns nil when unknown (no completed turn / no tokens / error).
+    private func fetchContext(endpoint: ServiceEndpoint, sessionID: String, usableByKey: [String: Int]) async -> SessionContext? {
+        guard let json = await getJSON(
+                endpoint: endpoint,
+                path: "api/session/\(sessionID)/message",
+                query: [URLQueryItem(name: "limit", value: "10")]
+              ) as? [String: Any],
+              let messages = json["data"] as? [[String: Any]] else { return nil }
+
+        // Newest-first; the first completed assistant turn carries `tokens`.
+        guard let assistant = messages.first(where: {
+                ($0["type"] as? String) == "assistant" && $0["tokens"] != nil
+              }),
+              let tokens = assistant["tokens"] as? [String: Any] else { return nil }
+
+        let cache = tokens["cache"] as? [String: Any]
+        let used = ((tokens["input"] as? NSNumber)?.intValue ?? 0)
+            + ((tokens["output"] as? NSNumber)?.intValue ?? 0)
+            + ((cache?["read"] as? NSNumber)?.intValue ?? 0)
+            + ((cache?["write"] as? NSNumber)?.intValue ?? 0)
+
+        var limit: Int?
+        if let model = assistant["model"] as? [String: Any],
+           let providerID = model["providerID"] as? String,
+           let modelID = model["id"] as? String {
+            limit = usableByKey["\(providerID)/\(modelID)"]
+        }
+
+        let fraction: Double? = {
+            guard let limit, limit > 0 else { return nil }
+            return Double(used) / Double(limit)
+        }()
+
+        return SessionContext(used: used, limit: limit, fraction: fraction)
     }
 
     private func publish(sessions: [SessionInfo]) {

@@ -4,6 +4,15 @@ enum SessionStatus: String {
     case idle, busy, waiting, error
 }
 
+/// Context-window usage for a session, derived from its most recent completed
+/// assistant turn and the model's usable ceiling. `limit` is nil when the
+/// model's limit info is unknown; `fraction` is nil when `limit` is nil/0.
+struct SessionContext: Equatable {
+    var used: Int
+    var limit: Int?
+    var fraction: Double?
+}
+
 struct SessionInfo: Equatable {
     let id: String
     var status: SessionStatus
@@ -13,6 +22,8 @@ struct SessionInfo: Equatable {
     var sessionTitle: String? = nil
     /// Session creation timestamp in milliseconds (session JSON `time.created`).
     var createdAt: TimeInterval = 0
+    /// Context-window usage, present only when the feature is enabled and known.
+    var context: SessionContext? = nil
 }
 
 func formatDurationLabel(sinceMS: TimeInterval, nowMS: TimeInterval) -> String {

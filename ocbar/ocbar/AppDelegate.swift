@@ -22,6 +22,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let bubbleColorKey = "ocbar.bubbleColor"
     private let alertSoundKey = "ocbar.alertSound"
     private let defaultBubbleSeconds = 10
+    private let contextUsageKey = "ocbar.contextUsage"
+    private let contextUsageDisplayKey = "ocbar.contextUsageDisplay"
+    private let contextUsageWarnKey = "ocbar.contextUsageWarn"
+    private let contextUsageCriticalKey = "ocbar.contextUsageCritical"
+    private let defaultContextUsageWarn = 80
+    private let defaultContextUsageCritical = 95
+    private static let contextWarnOptions = [70, 80, 90]
+    private static let contextCriticalOptions = [90, 95, 98]
+
+    /// Width of the status-glyph slot a session menu row uses, measured from the
+    /// same symbols/config `sessionItem` draws them with. The detail row mirrors
+    /// this width so AppKit lays its text out under the session name.
+    private static let sessionMenuImageWidth: CGFloat = {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let symbols = ["arrow.clockwise.circle.fill", "questionmark.circle.fill",
+                       "checkmark.circle.fill", "exclamationmark.triangle.fill"]
+        var widths = symbols.compactMap { symbol -> CGFloat? in
+            guard let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else { return nil }
+            return (img.withSymbolConfiguration(cfg) ?? img).size.width
+        }
+        // Busy rows use the spinner drawn on the checkmark canvas at pointSize 13.
+        let spinCfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        if let img = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil) {
+            widths.append((img.withSymbolConfiguration(spinCfg) ?? img).size.width)
+        }
+        return widths.max() ?? 16
+    }()
+    private static let sessionMenuImageHeight: CGFloat = 16
+    /// Extra leading inset (pt) added to the detail row's badge; bump to nudge
+    /// the detail text further right if the alignment needs fine-tuning.
+    private static let contextDetailExtraInset: CGFloat = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -68,6 +99,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                        duration: showSessionTime ? formatDurationLabel(sinceMS: s.createdAt, nowMS: nowMS) : "")
                 if s.status == .busy { busyMenuItems.append(item) }
                 menu.addItem(item)
+                if contextUsageEnabled {
+                    menu.addItem(contextDetailItem(for: s))
+                }
             }
         }
         menu.addItem(.separator())
@@ -78,6 +112,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(alertSoundMenu())
         menu.addItem(showSessionTimeMenu())
         menu.addItem(showSessionTitlesMenu())
+        menu.addItem(contextUsageMenu())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -193,6 +228,225 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func showSessionTitlesToggled(_ sender: NSMenuItem) {
         UserDefaults.standard.set(!showSessionTitles, forKey: showSessionTitlesKey)
         render(currentState, forceMenuRefresh: true)
+    }
+
+    // MARK: - Context usage
+
+    private var contextUsageEnabled: Bool {
+        guard let stored = UserDefaults.standard.object(forKey: contextUsageKey) as? Bool else { return false }
+        return stored
+    }
+
+    private enum ContextDisplay: String, CaseIterable {
+        case percent
+        case tokens
+        case both
+
+        var displayName: String {
+            switch self {
+            case .percent: return "Percent"
+            case .tokens: return "Tokens used"
+            case .both: return "Percent + tokens"
+            }
+        }
+    }
+
+    private var contextUsageDisplay: ContextDisplay {
+        guard let raw = UserDefaults.standard.string(forKey: contextUsageDisplayKey),
+              let display = ContextDisplay(rawValue: raw) else { return .both }
+        return display
+    }
+
+    private var contextUsageWarn: Int {
+        guard let stored = UserDefaults.standard.object(forKey: contextUsageWarnKey) as? Int else { return defaultContextUsageWarn }
+        return stored
+    }
+
+    private var contextUsageCritical: Int {
+        guard let stored = UserDefaults.standard.object(forKey: contextUsageCriticalKey) as? Int else { return defaultContextUsageCritical }
+        return stored
+    }
+
+    private func contextUsageMenu() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+
+        let toggle = NSMenuItem(title: "Show context usage", action: #selector(contextUsageToggled(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.state = contextUsageEnabled ? .on : .off
+        submenu.addItem(toggle)
+        submenu.addItem(.separator())
+
+        for (index, display) in ContextDisplay.allCases.enumerated() {
+            let item = NSMenuItem(title: display.displayName, action: #selector(contextUsageDisplaySelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = display == contextUsageDisplay ? .on : .off
+            submenu.addItem(item)
+        }
+        submenu.addItem(.separator())
+
+        for value in Self.contextWarnOptions {
+            let item = NSMenuItem(title: "Warn at \(value)%", action: #selector(contextUsageWarnSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = value
+            item.state = value == contextUsageWarn ? .on : .off
+            submenu.addItem(item)
+        }
+
+        for value in Self.contextCriticalOptions {
+            let item = NSMenuItem(title: "Critical at \(value)%", action: #selector(contextUsageCriticalSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = value
+            item.state = value == contextUsageCritical ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Context usage", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    @objc private func contextUsageToggled(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(!contextUsageEnabled, forKey: contextUsageKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    @objc private func contextUsageDisplaySelected(_ sender: NSMenuItem) {
+        let all = ContextDisplay.allCases
+        guard all.indices.contains(sender.tag) else { return }
+        UserDefaults.standard.set(all[sender.tag].rawValue, forKey: contextUsageDisplayKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    @objc private func contextUsageWarnSelected(_ sender: NSMenuItem) {
+        guard Self.contextWarnOptions.contains(sender.tag) else { return }
+        UserDefaults.standard.set(sender.tag, forKey: contextUsageWarnKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    @objc private func contextUsageCriticalSelected(_ sender: NSMenuItem) {
+        guard Self.contextCriticalOptions.contains(sender.tag) else { return }
+        UserDefaults.standard.set(sender.tag, forKey: contextUsageCriticalKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    /// Detail row shown beneath a session row when context usage is enabled.
+    /// Non-actionable (nil action + isEnabled) so its image slot is not dimmed.
+    private func contextDetailItem(for session: SessionInfo) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.isEnabled = true
+        // The session row's text starts after its status glyph in the image
+        // slot. Mirror that exact geometry instead of relying on an indent:
+        // image width = session glyph width, indentation = 0. AppKit then lays
+        // the detail text at the same x as the session name (under the name,
+        // not under the glyph).
+        item.indentationLevel = 0
+
+        // Width of this session row's own status-glyph slot, so the detail text
+        // lands exactly under the session's name (busy rows use the spinner
+        // canvas, other rows the status symbol at the row's point size).
+        let badgeWidth: CGFloat
+        if session.status == .busy {
+            badgeWidth = Self.spinnerGeometry(pointSize: 13).canvas.width
+        } else if let img = NSImage(systemSymbolName: statusAppearance(for: session.status).symbol, accessibilityDescription: nil) {
+            badgeWidth = (img.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)) ?? img).size.width
+        } else {
+            badgeWidth = Self.sessionMenuImageWidth
+        }
+
+        let baseFont = NSFont.menuFont(ofSize: 0)
+        let unknownAttributes: [NSAttributedString.Key: Any] = [
+            .font: baseFont,
+            .foregroundColor: NSColor.tertiaryLabelColor
+        ]
+
+        guard let context = session.context else {
+            item.attributedTitle = NSAttributedString(string: "Context — no completed turn yet", attributes: unknownAttributes)
+            item.image = contextDetailImage(glyph: nil, color: .tertiaryLabelColor, width: badgeWidth)
+            return item
+        }
+        guard let limit = context.limit else {
+            item.attributedTitle = NSAttributedString(string: "Context unknown — model limit unavailable", attributes: unknownAttributes)
+            item.image = contextDetailImage(glyph: nil, color: .tertiaryLabelColor, width: badgeWidth)
+            return item
+        }
+
+        let pct: Int
+        if let fraction = context.fraction {
+            pct = min(100, max(0, Int((fraction * 100).rounded())))
+        } else {
+            pct = min(100, max(0, Int((Double(context.used) / Double(limit) * 100).rounded())))
+        }
+
+        let bandColor: NSColor
+        let bandGlyph: String?
+        if pct >= contextUsageCritical {
+            bandColor = .systemRed
+            bandGlyph = "exclamationmark.octagon.fill"
+        } else if pct >= contextUsageWarn {
+            bandColor = .systemOrange
+            bandGlyph = "exclamationmark.triangle.fill"
+        } else {
+            bandColor = .labelColor
+            bandGlyph = nil
+        }
+
+        let tokensText = "\(compactTokens(context.used)) / \(compactTokens(limit)) tokens"
+        let percentText = "\(pct)%"
+        // Semibold percent is a redundant, colour-independent cue that only
+        // applies inside a band (warn or critical).
+        let inBand = bandGlyph != nil
+        let percentFont = inBand ? NSFont.systemFont(ofSize: baseFont.pointSize, weight: .semibold) : baseFont
+        let normalAttributes: [NSAttributedString.Key: Any] = [.font: baseFont, .foregroundColor: bandColor]
+        let percentAttributes: [NSAttributedString.Key: Any] = [.font: percentFont, .foregroundColor: bandColor]
+
+        let title = NSMutableAttributedString()
+        switch contextUsageDisplay {
+        case .percent:
+            title.append(NSAttributedString(string: percentText, attributes: percentAttributes))
+        case .tokens:
+            title.append(NSAttributedString(string: tokensText, attributes: normalAttributes))
+        case .both:
+            title.append(NSAttributedString(string: "\(tokensText) · ", attributes: normalAttributes))
+            title.append(NSAttributedString(string: percentText, attributes: percentAttributes))
+        }
+        item.attributedTitle = title
+        item.image = contextDetailImage(glyph: bandGlyph, color: bandColor, width: badgeWidth)
+        return item
+    }
+
+    /// A fixed-width leading badge for the detail row. Its width equals a
+    /// session row's status-glyph slot so the detail text (and the band glyph)
+    /// line up under the session name. Transparent when there is no band, so
+    /// alignment does not depend on band state.
+    private func contextDetailImage(glyph: String?, color: NSColor, width badgeWidth: CGFloat) -> NSImage {
+        let width = badgeWidth + Self.contextDetailExtraInset
+        let height = Self.sessionMenuImageHeight
+        return NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
+            guard let glyph,
+                  let base = NSImage(systemSymbolName: glyph, accessibilityDescription: nil) else { return true }
+            let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+            let img = self.tint(base.withSymbolConfiguration(cfg) ?? base, color: color)
+            let x = (rect.width - img.size.width) / 2
+            let y = (rect.height - img.size.height) / 2
+            img.draw(in: NSRect(x: x, y: y, width: img.size.width, height: img.size.height))
+            return true
+        }
+    }
+
+    /// Compact token formatter: `1_234 → "1.2k"`, `32_000 → "32k"`, ≥1M → `"1M"`.
+    private func compactTokens(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            let millions = Double(value) / 1_000_000
+            return millions == millions.rounded() ? "\(Int(millions))M" : String(format: "%.1fM", millions)
+        }
+        if value >= 1_000 {
+            let thousands = Double(value) / 1_000
+            return thousands == thousands.rounded() ? "\(Int(thousands))k" : String(format: "%.1fk", thousands)
+        }
+        return "\(value)"
     }
 
     private func projectsShownMenu() -> NSMenuItem {
