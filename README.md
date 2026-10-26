@@ -8,7 +8,7 @@ macOS menubar app that monitors [OpenCode](https://opencode.ai) sessions across 
 
 Shows a live status indicator in your menubar so you know when agents finish without watching the terminal.
 
-**Menubar label:** For one through the configured maximum of 1–10 sessions (default 4), each session shows its colored status icon followed by its project folder name only — never the session title. Sessions that share a folder name render identically (no disambiguation suffix). For zero or sessions above the configured maximum, the existing aggregate label is used, such as `● 2 busy · 1 idle`.
+**Menubar label:** Up to the configured maximum (menu → "Projects shown", 0–10 sessions, default 4), each session shows its colored status icon followed by its project folder name only — never the session title. Sessions that share a folder name render identically (no disambiguation suffix). Above that maximum the active sessions are still named and the finished ones fold into a single `✓ n idle`. Choosing "0 (none)" drops project names altogether: the label becomes one glyph plus a count per state, most urgent first — for one errored, two running, one waiting and one finished session that is `!1 · ●2 · ?1 · ✓1`.
 
 **Icon color:**
 - Orange — all sessions busy (agent working)

@@ -140,6 +140,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ]
 
         let total = state.sessions.count
+        var accessibility: String
         if total == 0 {
             button.image = nil
             // No sessions: glyph only. The status item shrinks to a bare dot —
@@ -152,19 +153,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             busyTitleAttachments = []
             currentButtonTitle = nil
             button.attributedTitle = NSAttributedString(string: "", attributes: attrs)
+            accessibility = "No OpenCode sessions"
+        } else if projectsShown == 0 {
+            // No names at all: one glyph + count per status that has sessions.
+            // Same status vocabulary the menu rows and the island use, and the
+            // glyphs alone are otherwise invisible to VoiceOver.
+            button.image = nil
+            let built = aggregateTitle(for: state.sessions, attributes: attrs)
+            busyTitleAttachments = built.busyAttachments
+            currentButtonTitle = built.title
+            button.attributedTitle = built.title
+            accessibility = built.summary
         } else if total <= projectsShown {
             button.image = nil
             let built = sessionTitle(for: state.sessions, attributes: attrs)
             busyTitleAttachments = built.busyAttachments
             currentButtonTitle = built.title
             button.attributedTitle = built.title
+            accessibility = spokenNames(for: state.sessions)
         } else {
             button.image = nil
             let built = foldedTitle(for: state.sessions, attributes: attrs)
             busyTitleAttachments = built.busyAttachments
             currentButtonTitle = built.title
             button.attributedTitle = built.title
+            accessibility = spokenNames(for: state.sessions)
         }
+        button.setAccessibilityLabel(accessibility)
     }
 
     private func updateSpinner() {
@@ -203,7 +218,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var projectsShown: Int {
         guard let stored = UserDefaults.standard.object(forKey: projectsShownKey) as? Int,
-              (1...10).contains(stored) else {
+              (0...10).contains(stored) else {
             return defaultProjectsShown
         }
         return stored
@@ -465,8 +480,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func projectsShownMenu() -> NSMenuItem {
         let submenu = NSMenu()
         submenu.autoenablesItems = false
-        for count in 1...10 {
-            let item = NSMenuItem(title: "\(count)", action: #selector(projectsShownSelected(_:)), keyEquivalent: "")
+        // 0 drops every project name; the menubar falls back to a glyph + count
+        // summary per status (see aggregateTitle).
+        for count in 0...10 {
+            let title = count == 0 ? "0 (none)" : "\(count)"
+            let item = NSMenuItem(title: title, action: #selector(projectsShownSelected(_:)), keyEquivalent: "")
             item.target = self
             item.tag = count
             item.state = count == projectsShown ? .on : .off
@@ -480,7 +498,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func projectsShownSelected(_ sender: NSMenuItem) {
-        guard (1...10).contains(sender.tag) else { return }
+        guard (0...10).contains(sender.tag) else { return }
         UserDefaults.standard.set(sender.tag, forKey: projectsShownKey)
         render(currentState, forceMenuRefresh: true)
     }
@@ -787,6 +805,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         return (title, busyAttachments)
+    }
+
+    /// Menubar label with no project names: one glyph + count per status that
+    /// actually has sessions, most urgent first, so the everyday case is the
+    /// same shape the island uses — `● 2  ·  ✓ 1`. Used when "Projects shown"
+    /// is 0. `summary` is the VoiceOver text, since glyphs and digits alone
+    /// say nothing out loud.
+    private func aggregateTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> (title: NSAttributedString, busyAttachments: [NSTextAttachment], summary: String) {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        let title = NSMutableAttributedString()
+        var busyAttachments: [NSTextAttachment] = []
+        var spoken: [String] = []
+
+        for status in [SessionStatus.error, .busy, .waiting, .idle] {
+            let count = sessions.filter { $0.status == status }.count
+            guard count > 0 else { continue }
+            if title.length > 0 {
+                title.append(NSAttributedString(string: "  ·  ", attributes: attributes))
+            }
+
+            let appearance = statusAppearance(for: status)
+            if let img = statusGlyphImage(appearance: appearance, status: status, cfg: cfg) {
+                let attachment = NSTextAttachment()
+                attachment.image = img
+                // Nudge down so glyph center aligns with text center (glyph sits ~1.84pt high otherwise)
+                attachment.bounds = NSRect(x: 0, y: -1.84, width: img.size.width, height: img.size.height)
+                title.append(NSAttributedString(attachment: attachment))
+                if status == .busy { busyAttachments.append(attachment) }
+            }
+            title.append(NSAttributedString(string: " \(count)", attributes: attributes))
+            spoken.append("\(count) \(status.rawValue)")
+        }
+
+        return (title, busyAttachments, spoken.joined(separator: ", "))
+    }
+
+    /// VoiceOver text for the menubar item while it renders project names.
+    private func spokenNames(for sessions: [SessionInfo]) -> String {
+        let names = disambiguatedNames(for: sessions)
+        return sessions.map { names[$0.id] ?? sessionName(for: $0) }.joined(separator: ", ")
     }
 
     private func sessionName(for session: SessionInfo) -> String {
