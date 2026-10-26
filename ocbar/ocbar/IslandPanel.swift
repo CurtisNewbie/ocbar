@@ -8,12 +8,20 @@ struct IslandRow {
     let pid: Int32?
 }
 
+/// Width of each flank of the collapsed pill — the strips either side of the
+/// physical cutout. Asymmetric on purpose: the right flank has to hold two
+/// state groups, the left only one. Fixed, never derived from the content, so
+/// the capsule cannot resize as statuses change.
+private let islandLeftFlank: CGFloat = 41
+private let islandRightFlank: CGFloat = 62
+
 /// CodeIsland-style "Dynamic Island" surface: a borderless, non-activating
 /// panel pinned to the very top edge of the target screen. Collapsed it hides
 /// inside the notch (or in a small pill on notch-less displays) and carries two
 /// self-explanatory readouts, one per flank: a dot with the number of running
-/// sessions on the left, and the most urgent non-running state with its own
-/// count on the right. On hover it drops an expanded card listing every session.
+/// sessions on the left, and the non-running states — up to two of them, most
+/// urgent first — each with its own count on the right. On hover it drops an
+/// expanded card listing every session.
 ///
 /// Everything is drawn black-and-white regardless of the system appearance,
 /// because the collapsed pill stands in for the physical notch.
@@ -90,7 +98,6 @@ final class IslandPanel {
     private let rowInset: CGFloat = 8
     private let bottomPadding: CGFloat = 8
     private let expandedCornerRadius: CGFloat = 18
-    private let notchFlank: CGFloat = 41
     private let plainCollapsedWidth: CGFloat = 200
     private let plainCollapsedHeight: CGFloat = 24
 
@@ -107,6 +114,11 @@ final class IslandPanel {
         let screen: NSScreen
         let notched: Bool
         let notchWidth: CGFloat
+        /// Left edge of the physical cutout, in screen coordinates. The pill is
+        /// positioned from this rather than from the screen's midpoint: the
+        /// flanks are asymmetric, so a centred pill would not line the cutout
+        /// up with the notch.
+        let notchOrigin: CGFloat
         let topInset: CGFloat
     }
 
@@ -126,6 +138,7 @@ final class IslandPanel {
         guard let screen = Self.targetScreen() else { return nil }
         var notched = false
         var notchWidth: CGFloat = 0
+        var notchOrigin: CGFloat = 0
         var topInset: CGFloat = 0
         if #available(macOS 12.0, *) {
             if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
@@ -133,20 +146,28 @@ final class IslandPanel {
                 if width > 8 {
                     notched = true
                     notchWidth = width
+                    notchOrigin = left.maxX
                     // The notch height is exactly the top safe-area inset.
                     topInset = max(screen.safeAreaInsets.top, plainCollapsedHeight)
                 }
             }
         }
-        return ScreenMetrics(screen: screen, notched: notched, notchWidth: notchWidth, topInset: topInset)
+        return ScreenMetrics(
+            screen: screen,
+            notched: notched,
+            notchWidth: notchWidth,
+            notchOrigin: notchOrigin,
+            topInset: topInset
+        )
     }
 
-    /// The collapsed pill: the notch itself (plus a small flank on each side so
-    /// the aggregate is actually visible next to the physical cutout) on a
-    /// notched display, or a compact centered pill elsewhere.
+    /// The collapsed pill: the cutout flanked by a status strip on each side, so
+    /// the readouts are actually visible next to the physical cutout. The flanks
+    /// are deliberately asymmetric (`islandLeftFlank` / `islandRightFlank`) and
+    /// the total is fixed, so the capsule never resizes as statuses change.
     private func collapsedSize(metrics: ScreenMetrics) -> NSSize {
         if metrics.notched {
-            return NSSize(width: max(metrics.notchWidth + notchFlank * 2, 120), height: metrics.topInset)
+            return NSSize(width: islandLeftFlank + metrics.notchWidth + islandRightFlank, height: metrics.topInset)
         }
         return NSSize(width: plainCollapsedWidth, height: plainCollapsedHeight)
     }
@@ -166,7 +187,22 @@ final class IslandPanel {
             size = collapsed
         }
         let screenFrame = metrics.screen.frame
-        var x = screenFrame.midX - size.width / 2
+        var x: CGFloat
+        if metrics.notched {
+            // Anchor on the cutout, not the screen centre, so the cutout lands
+            // exactly under the notch: the pill spans
+            // `cutoutLeft - leftFlank … cutoutRight + rightFlank`, which puts
+            // its left edge at exactly `notchOrigin - islandLeftFlank`. When the
+            // card is expanded it is wider than the pill, so it is centred on
+            // the cutout instead.
+            if expanded {
+                x = metrics.notchOrigin + metrics.notchWidth / 2 - size.width / 2
+            } else {
+                x = metrics.notchOrigin - islandLeftFlank
+            }
+        } else {
+            x = screenFrame.midX - size.width / 2
+        }
         x = min(max(x, screenFrame.minX + 4), max(screenFrame.minX + 4, screenFrame.maxX - size.width - 4))
         let y = screenFrame.maxY - size.height
         return NSRect(x: x.rounded(), y: y.rounded(), width: size.width, height: size.height)
@@ -218,6 +254,12 @@ final class IslandPanel {
 
         let collapsed = CollapsedContentView(frame: card.bounds)
         collapsed.autoresizingMask = [.width, .height]
+        collapsed.wantsLayer = true
+        // Two two-digit counts are wider than the right flank, so the strip can
+        // legitimately be asked for more room than it has. This mask stops the
+        // rare overflow from painting past the capsule's edge; the strip itself
+        // is positioned to stay clear of the cutout.
+        collapsed.layer?.masksToBounds = true
         card.addSubview(collapsed)
 
         panel.contentView = card
@@ -256,10 +298,11 @@ final class IslandPanel {
     }
 
     /// The collapsed pill's two readouts: how many sessions are running (left)
-    /// and the single most urgent non-running state with its own count (right).
-    /// A combined total would misreport the state, so the non-running states are
-    /// ranked error > waiting > idle and only the winner is shown. Cheap: the
-    /// collapsed view relayouts only when a count or the winning state changes.
+    /// and which non-running states need attention (right). Left answers "how
+    /// many are working", right answers "what needs me": each distinct
+    /// non-running state gets its own tinted glyph and count, most urgent first,
+    /// up to the two the flank can hold. Cheap: the collapsed view relayouts
+    /// only when a count or one of the shown states changes.
     private func refreshCollapsed() {
         var busy = 0
         var waiting = 0
@@ -274,15 +317,25 @@ final class IslandPanel {
             }
         }
         collapsedView?.busyCount = busy
-        if errors > 0 {
-            collapsedView?.attention = CollapsedContentView.Attention(status: .error, count: errors)
-        } else if waiting > 0 {
-            collapsedView?.attention = CollapsedContentView.Attention(status: .waiting, count: waiting)
-        } else if idle > 0 {
-            collapsedView?.attention = CollapsedContentView.Attention(status: .idle, count: idle)
-        } else {
-            collapsedView?.attention = nil
-        }
+        collapsedView?.attentions = Self.attentionStates(errors: errors, waiting: waiting, idle: idle)
+    }
+
+    /// The right flank's groups, ranked error > waiting > idle. The flank holds
+    /// two, so the least urgent state beyond that is dropped — with an error, a
+    /// waiting and a finished session the pill shows `! n ? m` and only the
+    /// finished count goes. Dropping is deliberate and is the whole point: a
+    /// single rolled-up count would misreport the state, and spending a group on
+    /// an ellipsis would hide one state to say nothing about another.
+    private static func attentionStates(
+        errors: Int,
+        waiting: Int,
+        idle: Int
+    ) -> [CollapsedContentView.Attention] {
+        var states: [CollapsedContentView.Attention] = []
+        if errors > 0 { states.append(.init(status: .error, count: errors)) }
+        if waiting > 0 { states.append(.init(status: .waiting, count: waiting)) }
+        if idle > 0 { states.append(.init(status: .idle, count: idle)) }
+        return Array(states.prefix(CollapsedContentView.maxAttentionGroups))
     }
 
     // MARK: - Show / hide
@@ -529,14 +582,19 @@ private final class IslandCardView: NSView {
 
 /// The collapsed pill's content, split across the two flanks of the physical
 /// cutout — the notch has no pixels, so nothing may be drawn across the middle
-/// of the pill. Each flank carries one small, self-explanatory group: left is a
-/// filled orange dot plus the number of *running* (busy) sessions, right is the
-/// most urgent *non-running* state's tinted glyph plus its own count. Left
-/// answers "how many are working", right answers "what needs me"; a bare digit
-/// was meaningless, the marker is what gives it meaning.
+/// of the pill. The left flank carries one small, self-explanatory group: a
+/// filled orange dot plus the number of *running* (busy) sessions. The right
+/// flank carries the *non-running* states, each as a tinted glyph plus its own
+/// count, up to two of them side by side. Left answers "how many are working",
+/// right answers "what needs me"; a bare digit was meaningless, the marker is
+/// what gives it meaning.
 private final class CollapsedContentView: NSView {
 
-    /// The most urgent non-busy state on show, with its own count.
+    /// How many non-busy state groups the right flank shows at once. The flank
+    /// is only 62pt wide; beyond this the caller drops the least urgent state.
+    static let maxAttentionGroups = 2
+
+    /// One non-busy state on show, with its own count.
     struct Attention: Equatable {
         let status: SessionStatus
         let count: Int
@@ -552,12 +610,13 @@ private final class CollapsedContentView: NSView {
         }
     }
 
-    /// Most urgent non-running state on the right flank. All-busy hides the
-    /// whole group — the "quiet while working" case.
-    var attention: Attention? {
+    /// The non-busy states on the right flank, most urgent first, at most
+    /// `maxAttentionGroups` of them. Empty (nothing non-busy) hides the whole
+    /// side — the "quiet while working" case.
+    var attentions: [Attention] = [] {
         didSet {
-            guard attention != oldValue else { return }
-            applyAttention()
+            guard attentions != oldValue else { return }
+            applyAttentions()
             needsLayout = true
         }
     }
@@ -569,8 +628,20 @@ private final class CollapsedContentView: NSView {
         didSet { if notchWidth != oldValue { needsLayout = true } }
     }
 
+    /// Space between two groups in a flank. A group's own marker-to-number gap
+    /// is 4.5pt; this has to read as a stronger separation. Six is the widest
+    /// that still leaves the required 2pt clearance from each flank edge when
+    /// both groups hold one digit (the flank's 62pt minus two 26pt groups leaves
+    /// 10pt to share between the gap and the two clearances).
+    private let groupGap: CGFloat = 6
+
+    /// Clearance kept between the drawn content and each edge it sits near —
+    /// the cutout edge and the capsule edge.
+    private let minFlankClearance: CGFloat = 2
+
     private let leftGroup = IslandMarkerGroup(frame: .zero)
-    private let rightGroup = IslandMarkerGroup(frame: .zero)
+    private let rightGroups = (0..<CollapsedContentView.maxAttentionGroups)
+        .map { _ in IslandMarkerGroup(frame: .zero) }
 
     override var isFlipped: Bool { true }
 
@@ -578,29 +649,34 @@ private final class CollapsedContentView: NSView {
         super.init(frame: frameRect)
         leftGroup.marker = .dot(.systemOrange)
         leftGroup.isHidden = true
-        rightGroup.isHidden = true
         addSubview(leftGroup)
-        addSubview(rightGroup)
+        for group in rightGroups {
+            group.isHidden = true
+            addSubview(group)
+        }
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not used")
     }
 
-    private func applyAttention() {
-        guard let attention else {
-            rightGroup.isHidden = true
-            return
+    private func applyAttentions() {
+        for (index, group) in rightGroups.enumerated() {
+            guard index < attentions.count else {
+                group.isHidden = true
+                continue
+            }
+            let attention = attentions[index]
+            group.number = attention.count
+            if let image = islandSymbolImage(
+                symbol: Self.symbol(for: attention.status),
+                color: Self.color(for: attention.status),
+                pointSize: 11
+            ) {
+                group.marker = .glyph(image)
+            }
+            group.isHidden = false
         }
-        rightGroup.number = attention.count
-        if let image = islandSymbolImage(
-            symbol: Self.symbol(for: attention.status),
-            color: Self.color(for: attention.status),
-            pointSize: 11
-        ) {
-            rightGroup.marker = .glyph(image)
-        }
-        rightGroup.isHidden = false
     }
 
     private static func symbol(for status: SessionStatus) -> String {
@@ -623,34 +699,63 @@ private final class CollapsedContentView: NSView {
 
     override func layout() {
         super.layout()
-        // The pill is centred on the screen and, near enough, so is the notch,
-        // so the middle of the pill is treated as the cutout: each group sits
-        // centred inside its own flank and never crosses the middle.
-        let split = notched && notchWidth > 0 && bounds.width > notchWidth
-        let notchOrigin = split ? (bounds.width - notchWidth) / 2 : bounds.width / 2
-        let notchEnd = split ? notchOrigin + notchWidth : notchOrigin
-
-        if !leftGroup.isHidden {
-            leftGroup.frame = centeredFrame(for: leftGroup, minX: 0, maxX: notchOrigin)
-        }
-        if !rightGroup.isHidden {
-            rightGroup.frame = centeredFrame(for: rightGroup, minX: notchEnd, maxX: bounds.width)
+        if notched && notchWidth > 0 {
+            // The window is positioned so the cutout's left edge sits exactly
+            // `islandLeftFlank` in from the pill's left edge, which puts the
+            // cutout at that same x here — no guessing from the view's centre.
+            let cutoutStart = islandLeftFlank
+            let cutoutEnd = cutoutStart + notchWidth
+            if !leftGroup.isHidden {
+                place([leftGroup], in: NSRect(x: 0, y: 0, width: cutoutStart, height: bounds.height))
+            }
+            let right = rightGroups.filter { !$0.isHidden }
+            if !right.isEmpty {
+                place(right, in: NSRect(x: cutoutEnd, y: 0, width: bounds.width - cutoutEnd, height: bounds.height))
+            }
+        } else {
+            // No cutout: both sides simply sit together, centred in the pill.
+            var groups: [IslandMarkerGroup] = []
+            if !leftGroup.isHidden { groups.append(leftGroup) }
+            groups.append(contentsOf: rightGroups.filter { !$0.isHidden })
+            if !groups.isEmpty { place(groups, in: bounds) }
         }
     }
 
-    /// Centre a group in its flank, keeping a symmetric clearance from both the
-    /// cutout edge and the pill edge.
-    private func centeredFrame(for group: IslandMarkerGroup, minX: CGFloat, maxX: CGFloat) -> NSRect {
-        let width = group.groupWidth
-        let x = minX + (maxX - minX - width) / 2
-        return NSRect(x: x.rounded(), y: 0, width: width, height: bounds.height)
+    /// Lay groups out left-to-right inside `region`, the block centred so both
+    /// edges get the same clearance. When the block would eat into that
+    /// clearance — two counts in the 62pt right flank can — the gap shrinks
+    /// first, down to zero, before the clearance is allowed to give. If the
+    /// groups are still wider than the region (two two-digit counts need 67pt)
+    /// the block is clamped so its left edge stays on the region's edge and
+    /// never crosses the cutout; the view masks its own bounds, so whatever is
+    /// still past the far edge is trimmed there rather than painted over the
+    /// capsule.
+    private func place(_ groups: [IslandMarkerGroup], in region: NSRect) {
+        let widths = groups.map { $0.groupWidth }
+        let content = widths.reduce(0, +)
+        var gap = groupGap
+        if groups.count > 1 {
+            gap = min(gap, max(0, region.width - content - minFlankClearance * 2))
+        }
+        let total = content + gap * CGFloat(groups.count - 1)
+        let x = max(region.minX, min(region.minX + (region.width - total) / 2, region.maxX - total))
+        var cursor = x
+        for (index, group) in groups.enumerated() {
+            group.frame = NSRect(
+                x: cursor.rounded(),
+                y: region.minY,
+                width: widths[index],
+                height: region.height
+            )
+            cursor += widths[index] + gap
+        }
     }
 }
 
-/// One flank of the collapsed pill: a small marker followed by the number of
-/// sessions it counts. The left group's marker is a plain filled dot — "how
-/// many are working" — while the right group's is a tinted SF Symbol — "what
-/// needs me". The number uses tabular digits so the group's width does not
+/// One group in a flank of the collapsed pill: a small marker followed by the
+/// number of sessions it counts. The left group's marker is a plain filled dot
+/// — "how many are working" — while a right group's is a tinted SF Symbol —
+/// "what needs me". The number uses tabular digits so the group's width does not
 /// jitter as the count changes.
 private final class IslandMarkerGroup: NSView {
 
