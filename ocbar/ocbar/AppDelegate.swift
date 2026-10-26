@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastSessions: [SessionInfo]? = nil
     private var currentState = AppState()
     private var bubble: StatusBubble!
+    private var island: IslandPanel!
     private var spinnerTimer: Timer?
     private var spinnerAngle: CGFloat = 0
     private var busyMenuItems: [NSMenuItem] = []
@@ -21,6 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let bubbleSecondsKey = "ocbar.bubbleSeconds"
     private let bubbleColorKey = "ocbar.bubbleColor"
     private let alertSoundKey = "ocbar.alertSound"
+    private let islandEnabledKey = "ocbar.island"
     private let defaultBubbleSeconds = 10
     private let contextUsageKey = "ocbar.contextUsage"
     private let contextUsageDisplayKey = "ocbar.contextUsageDisplay"
@@ -66,6 +68,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.render(state)
         }
         bubble = StatusBubble()
+        island = IslandPanel()
+        island.onSelectSession = { [weak self] pid in
+            self?.monitor.focusSession(pid: pid)
+        }
         monitor.onTransition = { [weak self] status, dir, pid, title in
             self?.showBubble(status: status, projectDir: dir, pid: pid, title: title)
         }
@@ -82,6 +88,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         currentState = state
         updateButton(for: state)
         updateSpinner()
+        // `render` is nonisolated but is only ever invoked on the main thread
+        // (AppKit callbacks + the monitor's main-actor poll); the island is a
+        // @MainActor type, so hop its push onto the main actor explicitly.
+        let islandSnapshot = islandRows(for: state.sessions)
+        let islandIsEnabled = islandEnabled
+        Task { @MainActor [island] in island?.update(rows: islandSnapshot, enabled: islandIsEnabled) }
 
         let sessions = state.sessions
         guard forceMenuRefresh || sessions != lastSessions else { return }
@@ -110,6 +122,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(bubbleSecondsMenu())
         menu.addItem(bubbleColorMenu())
         menu.addItem(alertSoundMenu())
+        menu.addItem(islandMenu())
         menu.addItem(showSessionTimeMenu())
         menu.addItem(showSessionTitlesMenu())
         menu.addItem(contextUsageMenu())
@@ -667,6 +680,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         render(currentState, forceMenuRefresh: true)
     }
 
+    // MARK: - Island
+
+    private var islandEnabled: Bool {
+        guard let stored = UserDefaults.standard.object(forKey: islandEnabledKey) as? Bool else { return true }
+        return stored
+    }
+
+    private func islandMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Show island", action: #selector(islandToggled(_:)), keyEquivalent: "")
+        item.target = self
+        item.state = islandEnabled ? .on : .off
+        return item
+    }
+
+    @objc private func islandToggled(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(!islandEnabled, forKey: islandEnabledKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    /// Rows handed to the island: the same disambiguated names, status and age
+    /// the dropdown uses, so the island and the menu tell the same story.
+    private func islandRows(for sessions: [SessionInfo]) -> [IslandRow] {
+        let nowMS = Date().timeIntervalSince1970 * 1000
+        let names = disambiguatedNames(for: sessions)
+        return sessions.map { session in
+            IslandRow(
+                name: names[session.id] ?? sessionName(for: session),
+                status: session.status,
+                duration: showSessionTime ? formatDurationLabel(sinceMS: session.createdAt, nowMS: nowMS) : "",
+                pid: session.clientPID
+            )
+        }
+    }
+
     private func menuLabel(_ text: String) -> NSMenuItem {
         let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
         item.isEnabled = true
@@ -961,6 +1008,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         bubble.stopPulsing()
+        island.collapse()
         render(currentState, forceMenuRefresh: true)
     }
 

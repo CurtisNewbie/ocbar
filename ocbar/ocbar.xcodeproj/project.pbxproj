@@ -10,16 +10,20 @@
 		DD0000000000000000000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000001 /* main.swift */; };
 		DD0000000000000000000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000002 /* AppDelegate.swift */; };
 		DD0000000000000000000003 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000003 /* Models.swift */; };
+		DD0000000000000000000004 /* StatusBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000004 /* StatusBubble.swift */; };
 		DD0000000000000000000005 /* OpenCodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000005 /* OpenCodeClient.swift */; };
 		DD0000000000000000000006 /* SessionMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000006 /* SessionMonitor.swift */; };
+		DD0000000000000000000009 /* IslandPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE0000000000000000000009 /* IslandPanel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		EE0000000000000000000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		EE0000000000000000000002 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		EE0000000000000000000003 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		EE0000000000000000000004 /* StatusBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBubble.swift; sourceTree = "<group>"; };
 		EE0000000000000000000005 /* OpenCodeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeClient.swift; sourceTree = "<group>"; };
 		EE0000000000000000000006 /* SessionMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMonitor.swift; sourceTree = "<group>"; };
+		EE0000000000000000000009 /* IslandPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IslandPanel.swift; sourceTree = "<group>"; };
 		EE0000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		EE0000000000000000000008 /* ocbar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ocbar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -49,8 +53,10 @@
 				EE0000000000000000000001 /* main.swift */,
 				EE0000000000000000000002 /* AppDelegate.swift */,
 				EE0000000000000000000003 /* Models.swift */,
+				EE0000000000000000000004 /* StatusBubble.swift */,
 				EE0000000000000000000005 /* OpenCodeClient.swift */,
 				EE0000000000000000000006 /* SessionMonitor.swift */,
+				EE0000000000000000000009 /* IslandPanel.swift */,
 				EE0000000000000000000007 /* Info.plist */,
 			);
 			path = ocbar;
@@ -130,8 +136,10 @@
 				DD0000000000000000000001 /* main.swift in Sources */,
 				DD0000000000000000000002 /* AppDelegate.swift in Sources */,
 				DD0000000000000000000003 /* Models.swift in Sources */,
+				DD0000000000000000000004 /* StatusBubble.swift in Sources */,
 				DD0000000000000000000005 /* OpenCodeClient.swift in Sources */,
 				DD0000000000000000000006 /* SessionMonitor.swift in Sources */,
+				DD0000000000000000000009 /* IslandPanel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

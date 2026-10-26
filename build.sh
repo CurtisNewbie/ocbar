@@ -14,6 +14,7 @@ swiftc \
   "$SRC/OpenCodeClient.swift" \
   "$SRC/SessionMonitor.swift" \
   "$SRC/StatusBubble.swift" \
+  "$SRC/IslandPanel.swift" \
   "$SRC/AppDelegate.swift" \
   "$SRC/main.swift" \
   -framework AppKit \
