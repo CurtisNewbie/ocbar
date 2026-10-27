@@ -58,6 +58,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let bubblePositionsKey = "ocbar.bubblePositions"
     private let bubbleSecondsKey = "ocbar.bubbleSeconds"
     private let bubbleColorKey = "ocbar.bubbleColor"
+    private let bubbleEnabledKey = "ocbar.bubble"
     private let alertSoundKey = "ocbar.alertSound"
     private let islandEnabledKey = "ocbar.island"
     private let defaultBubbleSeconds = 10
@@ -157,6 +158,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(projectsShownMenu())
+        menu.addItem(showBubbleMenu())
         menu.addItem(bubblePositionMenu())
         menu.addItem(bubbleSecondsMenu())
         menu.addItem(bubbleColorMenu())
@@ -515,6 +517,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func projectsShownSelected(_ sender: NSMenuItem) {
         guard (0...10).contains(sender.tag) else { return }
         UserDefaults.standard.set(sender.tag, forKey: projectsShownKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    private var bubbleEnabled: Bool {
+        guard let stored = UserDefaults.standard.object(forKey: bubbleEnabledKey) as? Bool else { return true }
+        return stored
+    }
+
+    private func showBubbleMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Show bubble", action: #selector(showBubbleToggled(_:)), keyEquivalent: "")
+        item.target = self
+        item.state = bubbleEnabled ? .on : .off
+        return item
+    }
+
+    @objc private func showBubbleToggled(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(!bubbleEnabled, forKey: bubbleEnabledKey)
         render(currentState, forceMenuRefresh: true)
     }
 
@@ -1073,6 +1092,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let trimmedTitle = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let body = (showSessionTitles && !trimmedTitle.isEmpty) ? trimmedTitle : statusWord
+        // The icon bounce exists only to draw the eye to the bubble, so with the
+        // bubble off it would point at nothing; gating both here keeps the two
+        // from ever disagreeing. "Alert sound" keeps its own menu option.
+        guard bubbleEnabled else { return }
         bounceIcon()
         alertSound.play()
         bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
