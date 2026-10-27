@@ -41,13 +41,25 @@ func aggregateSummary(statuses: [String]) -> String {
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var monitor: SessionMonitor!
+    /// The point size the status glyphs — and therefore the running mark standing among them — are drawn
+    /// at in the menubar title and in the dropdown rows. Named because the mark's canvas and its outer
+    /// diameter are both measured from the check-circle at exactly this size
+    /// (`IslandRing.image(pointSize:angle:)`): a "tidier" number here would silently resize the mark
+    /// relative to the discs beside it.
+    private let titleMarkPointSize: CGFloat = 11
+    private let menuMarkPointSize: CGFloat = 13
     private var menu: NSMenu!
     private var lastSessions: [SessionInfo]? = nil
     private var currentState = AppState()
     private var bubble: StatusBubble!
     private var island: IslandHost!
-    private var spinnerTimer: Timer?
-    private var spinnerAngle: CGFloat = 0
+    private var runningMarkTimer: Timer?
+    /// The menubar's running mark's current angle. Advances from the clock (see `tickRunningMark`) and is
+    /// held at `IslandRing.restingAngle` whenever the mark may not turn.
+    private var runningMarkAngle: CGFloat = IslandRing.restingAngle
+    /// Reduce Motion changes have to reach the menubar's mark without waiting for the next poll tick:
+    /// turning it on stops the rotation at the resting angle, and turning it off starts it again.
+    private var reduceMotionObserver: NSObjectProtocol?
     private var busyMenuItems: [NSMenuItem] = []
     private var busyTitleAttachments: [NSTextAttachment] = []
     private var currentButtonTitle: NSAttributedString?
@@ -74,18 +86,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Width of the status-glyph slot a session menu row uses, measured from the
     /// same symbols/config `sessionItem` draws them with. The detail row mirrors
     /// this width so AppKit lays its text out under the session name.
+    ///
+    /// A running row's slot is the *mark's* canvas (`IslandRing.canvasSize`), which is the
+    /// check-circle's image box at this point size — so it is already one of the widths measured here
+    /// and needs no entry of its own. (It used to need one, for the wedge spinner's canvas.)
     private static let sessionMenuImageWidth: CGFloat = {
         let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        let symbols = ["arrow.clockwise.circle.fill", "questionmark.circle.fill",
+        let symbols = ["questionmark.circle.fill",
                        "checkmark.circle.fill", "exclamationmark.triangle.fill"]
-        var widths = symbols.compactMap { symbol -> CGFloat? in
+        let widths = symbols.compactMap { symbol -> CGFloat? in
             guard let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else { return nil }
             return (img.withSymbolConfiguration(cfg) ?? img).size.width
-        }
-        // Busy rows use the spinner drawn on the checkmark canvas at pointSize 13.
-        let spinCfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-        if let img = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil) {
-            widths.append((img.withSymbolConfiguration(spinCfg) ?? img).size.width)
         }
         return widths.max() ?? 16
     }()
@@ -116,18 +127,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.showBubble(status: status, projectDir: dir, pid: pid, title: title)
         }
         monitor.onDismiss = { [weak self] dir in
-            self?.dismissBubble(projectDir: dir)
+            self?.dismissReminders(projectDir: dir)
         }
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // Reduce Motion reaches the menubar's running mark for the first time: the island's ring
+        // re-reads the setting on this same notification, so the menubar's mark follows it — off stops
+        // the rotation and paints the mark still, on starts it turning again. `queue: .main`, so this
+        // is the main thread, where `updateRunningMark` and the status item belong.
+        reduceMotionObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateRunningMark()
+        }
         monitor.start()
         render(AppState())
     }
 
     private func render(_ state: AppState, forceMenuRefresh: Bool = false) {
         currentState = state
+        // `updateRunningMark` first: it owns the running mark's angle (it holds it at the resting angle
+        // when Reduce Motion forbids turning it), and `updateButton` below renders that angle into the
+        // title. Swapping the two would draw one frame at a stale angle on the tick Reduce Motion
+        // changes — the observer catches it immediately, but the poll tick should not need catching.
+        updateRunningMark()
         updateButton(for: state)
-        updateSpinner()
         // `render` is nonisolated but is only ever invoked on the main thread
         // (AppKit callbacks + the monitor's main-actor poll); the island is a
         // @MainActor type, so hop its push onto the main actor explicitly.
@@ -174,7 +200,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateButton(for state: AppState) {
         guard let button = statusItem.button else { return }
 
-        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        let cfg = NSImage.SymbolConfiguration(pointSize: titleMarkPointSize, weight: .medium)
         let attrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor.labelColor,
             .font: NSFont.menuBarFont(ofSize: 13)
@@ -237,38 +263,56 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.setAccessibilityLabel(accessibility)
     }
 
-    private func updateSpinner() {
+    private func updateRunningMark() {
         let busy = currentState.sessions.contains { $0.status == .busy }
-        if busy {
-            guard spinnerTimer == nil else { return }
-            let timer = Timer(timeInterval: 0.06, repeats: true) { [weak self] _ in
-                self?.tickSpinner()
+        // **Reduce Motion, honoured on the menubar's mark for the first time.** The mark still says
+        // "running" — its tint and its shape do that — but it holds at its resting angle instead of
+        // turning, exactly as the island's ring does (`IslandActivityView.shouldPlay`). With nothing
+        // moving there is also nothing for a 16.7fps timer to repaint, so it does not run.
+        let turning = busy && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if turning {
+            guard runningMarkTimer == nil else { return }
+            let timer = Timer(timeInterval: IslandRing.tickInterval, repeats: true) { [weak self] _ in
+                self?.tickRunningMark()
             }
             RunLoop.main.add(timer, forMode: .common)
-            spinnerTimer = timer
-        } else if let timer = spinnerTimer {
-            timer.invalidate()
-            spinnerTimer = nil
-            spinnerAngle = 0
+            runningMarkTimer = timer
+            return
         }
+        runningMarkTimer?.invalidate()
+        runningMarkTimer = nil
+        // A mark that is not turning is put back to its resting angle rather than left wherever the
+        // last tick stopped it: a gap frozen at an arbitrary angle reads as a spinner that has
+        // stalled (the island's ring is held the same way).
+        runningMarkAngle = IslandRing.restingAngle
+        // …and if there *is* something running, repaint it still, now, instead of leaving the last
+        // angle on screen until the next render.
+        if busy { refreshBusyMarks() }
     }
 
-    private func tickSpinner() {
-        // Rotate clockwise to match the arrow's direction. 45° per 0.06s
-        // tick keeps the apparent speed at ~750°/s while running ~16.7 fps.
-        spinnerAngle = (spinnerAngle - 45).truncatingRemainder(dividingBy: 360)
-        // Swap the busy glyphs inside the already-built title instead of
-        // rebuilding the whole attributed string every frame.
+    /// Repaint every running mark at the current angle: the title's attachments in place, rather than
+    /// rebuilding the whole attributed string every frame, and the dropdown rows' images.
+    private func refreshBusyMarks() {
         if !busyTitleAttachments.isEmpty, let title = currentButtonTitle {
-            let img = busySpinnerImage(color: .systemOrange, pointSize: 11)
+            let img = IslandRing.image(pointSize: titleMarkPointSize, angle: runningMarkAngle)
             for attachment in busyTitleAttachments {
                 attachment.image = img
             }
             statusItem.button?.attributedTitle = title
         }
         for item in busyMenuItems {
-            item.image = busySpinnerImage(color: .systemOrange, pointSize: 13)
+            item.image = IslandRing.image(pointSize: menuMarkPointSize, angle: runningMarkAngle)
         }
+    }
+
+    private func tickRunningMark() {
+        // The angle is a function of the clock, not an accumulator, so every ring in the app — this
+        // one, the island's pill and its card rows — is at the same angle at the same instant, and a
+        // late tick cannot make this mark drift away from the others. The tick only decides *when*
+        // the image is redrawn, which is still `IslandRing.tickInterval` (0.06s, the ~16.7fps the
+        // wedge spinner ran at; the speed itself is `IslandRing.stepDegrees`/`revolutionSeconds`).
+        runningMarkAngle = IslandRing.angle(at: Date())
+        refreshBusyMarks()
     }
 
     private var projectsShown: Int {
@@ -414,13 +458,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.indentationLevel = 0
 
         // Width of this session row's own status-glyph slot, so the detail text
-        // lands exactly under the session's name (busy rows use the spinner
+        // lands exactly under the session's name (a running row uses the mark's
         // canvas, other rows the status symbol at the row's point size).
         let badgeWidth: CGFloat
         if session.status == .busy {
-            badgeWidth = Self.spinnerGeometry(pointSize: 13).canvas.width
-        } else if let img = NSImage(systemSymbolName: statusAppearance(for: session.status).symbol, accessibilityDescription: nil) {
-            badgeWidth = (img.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)) ?? img).size.width
+            badgeWidth = IslandRing.canvasSize(pointSize: menuMarkPointSize).width
+        } else if let symbol = statusAppearance(for: session.status).symbol,
+                  let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+            badgeWidth = (img.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: menuMarkPointSize, weight: .regular)) ?? img).size.width
         } else {
             badgeWidth = Self.sessionMenuImageWidth
         }
@@ -794,7 +839,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func sessionTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> (title: NSAttributedString, busyAttachments: [NSTextAttachment]) {
         let title = NSMutableAttributedString()
-        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        let cfg = NSImage.SymbolConfiguration(pointSize: titleMarkPointSize, weight: .medium)
         var busyAttachments: [NSTextAttachment] = []
 
         for (index, session) in sessions.enumerated() {
@@ -819,7 +864,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func foldedTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> (title: NSAttributedString, busyAttachments: [NSTextAttachment]) {
         let title = NSMutableAttributedString()
-        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        let cfg = NSImage.SymbolConfiguration(pointSize: titleMarkPointSize, weight: .medium)
         var busyAttachments: [NSTextAttachment] = []
 
         let active = sessions.filter { $0.status != .idle }
@@ -848,7 +893,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             let appearance = statusAppearance(for: .idle)
-            if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: SessionStatus.idle.rawValue) {
+            if let symbol = appearance.symbol,
+               let base = NSImage(systemSymbolName: symbol, accessibilityDescription: SessionStatus.idle.rawValue) {
                 let img = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
                 let attachment = NSTextAttachment()
                 attachment.image = img
@@ -867,7 +913,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// is 0. `summary` is the VoiceOver text, since glyphs and digits alone
     /// say nothing out loud.
     private func aggregateTitle(for sessions: [SessionInfo], attributes: [NSAttributedString.Key: Any]) -> (title: NSAttributedString, busyAttachments: [NSTextAttachment], summary: String) {
-        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        let cfg = NSImage.SymbolConfiguration(pointSize: titleMarkPointSize, weight: .medium)
         let title = NSMutableAttributedString()
         var busyAttachments: [NSTextAttachment] = []
 
@@ -941,10 +987,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(text.prefix(limit)).trimmingCharacters(in: .whitespaces) + "…"
     }
 
-    private func statusAppearance(for status: SessionStatus) -> (symbol: String, color: NSColor) {
+    /// How a status becomes a mark. `symbol` is `nil` for `.busy`: its mark is not an SF Symbol any
+    /// more, it is the ring (`IslandRing`) that the island, the menubar and the dropdown all draw —
+    /// the same mark, from the same construction. The colour is still resolved here, and `.busy` reads
+    /// `IslandRing.runningTint`, so a status still becomes a colour in one place per surface.
+    private func statusAppearance(for status: SessionStatus) -> (symbol: String?, color: NSColor) {
         switch status {
         case .busy:
-            return ("arrow.clockwise.circle.fill", .systemOrange)
+            return (nil, IslandRing.runningTint)
         case .waiting:
             return ("questionmark.circle.fill", .systemBlue)
         case .idle:
@@ -954,111 +1004,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func statusGlyphImage(appearance: (symbol: String, color: NSColor), status: SessionStatus, cfg: NSImage.SymbolConfiguration) -> NSImage? {
-        guard let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: status.rawValue) else { return nil }
-        let configured = base.withSymbolConfiguration(cfg) ?? base
+    private func statusGlyphImage(appearance: (symbol: String?, color: NSColor), status: SessionStatus, cfg: NSImage.SymbolConfiguration) -> NSImage? {
+        // The running mark: the same ring the island draws, rendered as an image because a title
+        // attachment and a menu item cannot host a view. Its canvas is the check-circle's image box at
+        // this point size — the box the attachment's bounds and baseline nudge are computed against —
+        // and its outer edge lands on that circle's measured ink, so a busy entry is neither a
+        // different size nor a different shape from the idle one beside it.
         if status == .busy {
-            return busySpinnerImage(color: appearance.color)
+            return IslandRing.image(pointSize: titleMarkPointSize, angle: runningMarkAngle)
         }
-        return tint(configured, color: appearance.color)
-    }
-
-    // The busy spinner is drawn as vector paths so it stays crisp at every angle.
-    // A solid disc with a rotating gap keeps the same visual mass as the idle
-    // check-circle (also a disc with a knocked-out mark) and matches its outer
-    // diameter, so the running state reads as solid and bright as the green disc.
-    private func busySpinnerImage(color: NSColor, pointSize: CGFloat = 11) -> NSImage {
-        let geometry = Self.spinnerGeometry(pointSize: pointSize)
-        let canvas = geometry.canvas
-        let radius = geometry.diameter / 2
-        return NSImage(size: canvas, flipped: false) { rect in
-            let center = NSPoint(x: rect.midX, y: rect.midY)
-            color.setFill()
-            NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
-                                        width: radius * 2, height: radius * 2)).fill()
-
-            // Knock out a rotating gap. spinnerAngle decreases each tick, which
-            // is clockwise in this unflipped space, matching the arrow's
-            // former direction.
-            guard let ctx = NSGraphicsContext.current else { return true }
-            ctx.compositingOperation = .clear
-            let gap = NSBezierPath()
-            gap.move(to: center)
-            gap.appendArc(withCenter: center, radius: radius,
-                          startAngle: self.spinnerAngle, endAngle: self.spinnerAngle - self.spinnerWedgeDegrees,
-                          clockwise: true)
-            gap.close()
-            gap.fill()
-            return true
-        }
-    }
-
-    // Busy spinner geometry. The canvas matches the idle check-circle's symbol
-    // image size so the attachment baseline offset is unchanged, and the disc's
-    // outer diameter is matched to the green disc's circle. The wedge removes a
-    // similar fraction of area as the checkmark does from the idle disc.
-    private let spinnerWedgeDegrees: CGFloat = 70
-    private static let spinnerOpticalScale: CGFloat = 1.0
-
-    // Geometry is constant for a given (symbol, pointSize, weight), so the
-    // expensive glyph measurement is memoized per pointSize instead of being
-    // repeated every spinner frame.
-    private static var spinnerGeometryCache: [CGFloat: (canvas: NSSize, diameter: CGFloat)] = [:]
-
-    private static func spinnerGeometry(pointSize: CGFloat) -> (canvas: NSSize, diameter: CGFloat) {
-        if let cached = spinnerGeometryCache[pointSize] { return cached }
-        let cfg = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .medium)
-        let canvas = symbolImageSize("checkmark.circle.fill", cfg: cfg)
-        let diameter = (visualGlyphDiameter(symbol: "checkmark.circle.fill", cfg: cfg) ?? 12) * spinnerOpticalScale
-        let geometry = (canvas: canvas, diameter: diameter)
-        spinnerGeometryCache[pointSize] = geometry
-        return geometry
-    }
-
-    private static func symbolImageSize(_ symbol: String, cfg: NSImage.SymbolConfiguration) -> NSSize {
-        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else {
-            return NSSize(width: 14, height: 14)
-        }
-        return (base.withSymbolConfiguration(cfg) ?? base).size
-    }
-
-    // Diameter of a glyph's circle, measured from its opaque bounds so different
-    // SF Symbols can be compared regardless of their image padding.
-    private static func visualGlyphDiameter(symbol: String, cfg: NSImage.SymbolConfiguration) -> CGFloat? {
-        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else { return nil }
-        let image = base.withSymbolConfiguration(cfg) ?? base
-        let scale: CGFloat = 8
-        let px = Int((max(image.size.width, image.size.height) * scale).rounded())
-        guard px > 0,
-              let ctx = CGContext(data: nil, width: px, height: px, bitsPerComponent: 8,
-                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.clear(CGRect(x: 0, y: 0, width: px, height: px))
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-        image.draw(in: NSRect(x: 0, y: 0, width: CGFloat(px), height: CGFloat(px)))
-        NSGraphicsContext.restoreGraphicsState()
-        guard let data = ctx.data else { return nil }
-        let ptr = data.bindMemory(to: UInt8.self, capacity: px * px * 4)
-        var minX = px, maxX = -1, minY = px, maxY = -1
-        for y in 0..<px { for x in 0..<px where ptr[(y * px + x) * 4 + 3] > 128 {
-            if x < minX { minX = x }
-            if x > maxX { maxX = x }
-            if y < minY { minY = y }
-            if y > maxY { maxY = y }
-        } }
-        guard maxX >= 0, maxY >= 0 else { return nil }
-        return CGFloat(max(maxX - minX + 1, maxY - minY + 1)) / scale
+        guard let symbol = appearance.symbol,
+              let base = NSImage(systemSymbolName: symbol, accessibilityDescription: status.rawValue) else { return nil }
+        return tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
     }
 
     private func sessionItem(name: String, status: SessionStatus, pid: Int32?, duration: String) -> NSMenuItem {
         let appearance = statusAppearance(for: status)
         let title = duration.isEmpty ? name : "\(name)  ·  \(duration)"
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let cfg = NSImage.SymbolConfiguration(pointSize: menuMarkPointSize, weight: .regular)
         if status == .busy {
-            item.image = busySpinnerImage(color: appearance.color, pointSize: 13)
-        } else if let base = NSImage(systemSymbolName: appearance.symbol, accessibilityDescription: status.rawValue) {
+            // The same ring the menubar's title and the island draw, as a menu-item image.
+            item.image = IslandRing.image(pointSize: menuMarkPointSize, angle: runningMarkAngle)
+        } else if let symbol = appearance.symbol,
+                  let base = NSImage(systemSymbolName: symbol, accessibilityDescription: status.rawValue) {
             item.image = tint(base.withSymbolConfiguration(cfg) ?? base, color: appearance.color)
         }
         item.isEnabled = true
@@ -1092,19 +1061,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let trimmedTitle = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let body = (showSessionTitles && !trimmedTitle.isEmpty) ? trimmedTitle : statusWord
+        // Which surface carries the reminder is a chain, not two independent
+        // switches: the bubble when it is on, otherwise the island, otherwise
+        // nothing (the system notification from SessionMonitor still lands).
         // The icon bounce exists only to draw the eye to the bubble, so with the
-        // bubble off it would point at nothing; gating both here keeps the two
-        // from ever disagreeing. "Alert sound" keeps its own menu option.
-        guard bubbleEnabled else { return }
-        bounceIcon()
-        alertSound.play()
-        bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
-            self?.monitor.focusSession(pid: pid)
+        // bubble off it would point at nothing; gating it here keeps the two from
+        // ever disagreeing.
+        if bubbleEnabled {
+            bounceIcon()
+            bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
+                self?.monitor.focusSession(pid: pid)
+            }
+        } else if islandEnabled {
+            // The island takes over: it opens itself on the transition and folds
+            // back after the same number of seconds the bubble would have stayed
+            // up, so the two surfaces read as one reminder at two durations. The
+            // island is a `@MainActor` type and this runs on the transition
+            // callback, so the push hops explicitly — the same shape as `render`'s
+            // island push.
+            let kind: IslandAlertKind = status == .waiting ? .waiting : .ready
+            let seconds = TimeInterval(bubbleSeconds)
+            // `name` is the folder's display name, which is also what `dismissReminders` matches on when
+            // the reminder's reason goes away — the same key the bubble uses.
+            Task { @MainActor [island] in island?.alert(name: name, kind: kind, pid: pid, seconds: seconds) }
+        }
+        // "Alert sound" is its own setting and is not owned by either surface: it
+        // rings whenever one of them is going to show something. `.off` is the
+        // default, so a user who never picked a sound is unaffected.
+        if bubbleEnabled || islandEnabled {
+            alertSound.play()
         }
     }
 
-    private func dismissBubble(projectDir: String) {
-        bubble.dismiss(ifShowing: displayName(for: projectDir))
+    /// The reason for a reminder is gone: the user answered the prompt, or the session went back to work
+    /// (`SessionMonitor.onDismiss`, which fires for exactly those two, plus a session that disappears).
+    /// Both surfaces are dismissed by the **same key** — the folder's display name — because that is what
+    /// the callback carries, and the two reminders are the same event reported twice.
+    private func dismissReminders(projectDir: String) {
+        let name = displayName(for: projectDir)
+        bubble.dismiss(ifShowing: name)
+        // The island retracts its own way: it hands the card back to its hover machine rather than folding
+        // it (an unattended card closes on the ordinary hover deadline, a card the user is pointing at
+        // stays up), and it only touches a panel whose armed alert is this one. It is a `@MainActor` type
+        // and this runs on the monitor's callback, so the push hops explicitly — the same shape as the
+        // alert push in `showBubble`.
+        Task { @MainActor [island] in island?.dismissAlert(named: name) }
     }
 
     private func bounceIcon() {
