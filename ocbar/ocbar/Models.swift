@@ -162,17 +162,46 @@ struct SessionInfo: Equatable {
     var sessionTitle: String? = nil
     /// Session creation timestamp in milliseconds (session JSON `time.created`).
     var createdAt: TimeInterval = 0
+    /// Last-update timestamp in milliseconds (session JSON `time.updated`), 0
+    /// when the payload carries none. It is the same read the monitor already
+    /// does to decide visibility, so the card's last-touch stamp costs no extra
+    /// request.
+    var updatedAt: TimeInterval = 0
     /// Context-window usage, present only when the feature is enabled and known.
     var context: SessionContext? = nil
+}
+
+/// `5h36m` / `3h` / `12m` — the card's and the menu's one duration form.
+func durationText(minutes: Int) -> String {
+    let h = minutes / 60
+    let m = minutes % 60
+    if h > 0 { return m > 0 ? "\(h)h\(m)m" : "\(h)h" }
+    return "\(m)m"
 }
 
 func formatDurationLabel(sinceMS: TimeInterval, nowMS: TimeInterval) -> String {
     guard sinceMS > 0 else { return "" }
     let minutes = max(0, Int((nowMS - sinceMS) / 60_000))
-    let h = minutes / 60
-    let m = minutes % 60
-    if h > 0 { return m > 0 ? "\(h)h\(m)m" : "\(h)h" }
-    return "\(m)m"
+    return durationText(minutes: minutes)
+}
+
+/// The row's last-touch stamp: how long since the session was updated, or "now".
+///
+/// No "ago": the stamp sits immediately right of the session's age in line 1's
+/// right slot (`5h36m · 2m`), so it is a second number in one right-aligned
+/// column of times, not a sentence of its own — one unit, one font, no words.
+/// The first minute still gets `now` rather than `0m`, which would read as a
+/// broken clock.
+///
+/// Empty in two cases. No `time.updated` at all, and — the subtle one — a
+/// session that has never been updated since it was created: its updated
+/// timestamp is just the creation one, so the stamp would repeat the age beside
+/// it (`3h12m · 3h12m`). Only a real update earns the second number.
+func formatStampLabel(updatedMS: TimeInterval, createdMS: TimeInterval, nowMS: TimeInterval) -> String {
+    guard updatedMS > 0 else { return "" }
+    guard updatedMS - createdMS >= 60_000 else { return "" }
+    let minutes = max(0, Int((nowMS - updatedMS) / 60_000))
+    return minutes == 0 ? "now" : durationText(minutes: minutes)
 }
 
 /// The folder a session belongs to, as the menubar and the island identify it:

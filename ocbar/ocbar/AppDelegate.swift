@@ -797,9 +797,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Rows handed to the island: the same status and age the dropdown uses, plus
-    /// the folder name and the session title's leading part on line 1, and the
+    /// the folder name and the session title's leading part on line 1, the
     /// context-usage line when that feature is on — again built from the same
-    /// presentation the dropdown's detail row uses.
+    /// presentation the dropdown's detail row uses — and, on that same line's
+    /// right end, how long ago the session was last updated.
     private func islandRows(for sessions: [SessionInfo]) -> [IslandRow] {
         let nowMS = Date().timeIntervalSince1970 * 1000
         let names = islandRowNames(for: sessions, showTitles: showSessionTitles)
@@ -812,7 +813,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 status: session.status,
                 duration: showSessionTime ? formatDurationLabel(sinceMS: session.createdAt, nowMS: nowMS) : "",
                 pid: session.clientPID,
-                context: islandContext(for: session)
+                context: islandContext(for: session),
+                stamp: showSessionTime ? formatStampLabel(updatedMS: session.updatedAt, createdMS: session.createdAt, nowMS: nowMS) : ""
             )
         }
     }

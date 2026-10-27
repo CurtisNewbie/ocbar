@@ -13,8 +13,16 @@ struct IslandRow {
     let pid: Int32?
     /// Context-window usage for this session, already resolved to the exact
     /// text/band the dropdown's detail row would show. Nil when the feature is
-    /// off — the row then renders as a single line, exactly as before.
+    /// off — the row's state line then carries the stamp alone, or is absent when
+    /// there is no stamp either, which is how the row shrinks back to the shape
+    /// it had before this line existed.
     let context: IslandContext?
+    /// How long ago the session was last updated, drawn in line 1's right slot
+    /// just right of the age (`5h36m · 2m`). Empty means there is nothing to
+    /// show — no `time.updated`, or an update stamp that is just the creation
+    /// time, which the age beside it already says. So an empty string is a
+    /// decision, not a gap.
+    let stamp: String
 }
 
 /// The two text fields a row shows — the folder name on the row's first line and
@@ -119,6 +127,16 @@ private let islandRowGlyphGap: CGFloat = 8
 /// under the session names rather than under their status glyphs.
 private let islandRowTextInset = islandRowLeadingInset + islandRowGlyphSize + islandRowGlyphGap
 
+/// The separator inside line 1's right slot: `5h36m · 2m`. The age and the
+/// last-update stamp are two answers to the same question — how long — so they
+/// share one slot and one glance rather than each claiming a column.
+private let islandAgeStampSeparator = "· "
+/// The space left of that separator. The dot brings its own on the right, so
+/// this is only its left side, and it is tighter than the 8pt glyph gap: these
+/// two stamps are read as one unit, and `·` is a separator inside it, not the
+/// distance between two columns.
+private let islandAgeStampGap: CGFloat = 5
+
 // The alert's mark on a row: a short saturated rule in the row's leading padding.
 // That padding is the one column of a row nothing else is drawn in — the status
 // glyph starts at `islandRowLeadingInset`, 3pt to its right, and no line of text
@@ -213,14 +231,17 @@ private let islandActionButtonHoverDuration: TimeInterval = 0.15
 
 // A row stacks up to three lines, always in this order:
 //
-//     folder name                      age
+//     folder name          age · updated
 //     title
 //     context usage
 //
 // The folder is always there; the title when the session has one; the context
 // readout when that feature is on. Each line is a distinct concern, which is why
 // the title moved off the folder's line: sharing it meant the folder and the
-// title truncating each other.
+// title truncating each other. The last-update stamp stays on line 1 instead of
+// joining the context line: both times belong to the session as a whole, and a
+// right-aligned column of them reads as one glance — the context line is about
+// the window, which is a different question.
 
 /// Height of a one-line row — the original single-line row, unchanged.
 let islandRowOneLineHeight: CGFloat = 30
@@ -300,8 +321,10 @@ private let fakeNotchMaxWidth: CGFloat = 240
 ///
 ///  - line 1, folder + right-aligned age: the longest real folder
 ///    (`opencode-context-analysis-plugin`, 32 chars, 208pt at 12.5 medium) plus
-///    the longest age (`12h30m`) needs a 304pt card; none of the 202 real folders
-///    truncate from 420pt up, and 500 leaves a ~55-character folder box;
+///    the longest age (`12h30m`); with a session's last-update stamp beside it
+///    (`12h30m · 1h6m`) the right slot is still under 100pt. None of the 202
+///    real folders truncate from 420pt up, and 500 leaves a ~55-character
+///    folder box;
 ///  - line 3, the context readout at 11 regular: the longest string
 ///    (`Context unknown — model limit unavailable`, 227pt) needs 286pt;
 ///  - line 2, the title at 12.5 regular: this is what sets the number. Against
@@ -738,11 +761,14 @@ final class IslandPanel {
     /// Signature of what is actually rendered: the visible rows plus how many
     /// were folded away. The folded count is part of it so folding or unfolding
     /// rebuilds the card — and, when it is open, resizes it.
+    ///
+    /// The stamp is part of each row's entry for the same reason its age is: it
+    /// is text on screen, so `now → 1m` has to rebuild the card.
     private static func signature(for rows: [IslandRow], folded: Int) -> String {
         let list = rows
             .map { row in
                 let context = row.context.map { "\($0.text)|\($0.glyph ?? "-")|\($0.band.rawValue)" } ?? "-"
-                return "\(row.name)|\(row.title ?? "-")|\(row.status.rawValue)|\(row.duration)|\(row.pid.map { String($0) } ?? "-")|\(context)"
+                return "\(row.name)|\(row.title ?? "-")|\(row.status.rawValue)|\(row.duration)|\(row.stamp)|\(row.pid.map { String($0) } ?? "-")|\(context)"
             }
             .joined(separator: "\u{1}")
         return "\(folded)\u{2}\(list)"
@@ -1129,7 +1155,8 @@ final class IslandPanel {
                 status: row.status,
                 duration: row.duration,
                 pid: row.pid,
-                context: row.context
+                context: row.context,
+                stamp: row.stamp
             )
         }
         card.rowViews = rowViews
@@ -2892,6 +2919,10 @@ private final class IslandRowView: NSView {
     private let durationLabel = NSTextField(labelWithString: "")
     private let contextGlyph = NSImageView()
     private let contextLabel = NSTextField(labelWithString: "")
+    /// The last-update stamp, in line 1's right slot immediately right of the age
+    /// (`5h36m · 2m`). Its own field because it must keep its measured width at
+    /// the trailing edge while the folder name truncates in what is left.
+    private let stampLabel = NSTextField(labelWithString: "")
     /// The alert's mark, at the row's leading edge. Inert — the card's `hitTest`
     /// hands clicks to the row view itself, so nothing here needs to claim or
     /// refuse one.
@@ -2910,6 +2941,7 @@ private final class IslandRowView: NSView {
     private var tracking: NSTrackingArea?
     private var pid: Int32?
     private var hasContext = false
+    private var hasStamp = false
     private var hasTitleText = false
     private var hovering = false {
         didSet { if hovering != oldValue { needsDisplay = true } }
@@ -2952,7 +2984,8 @@ private final class IslandRowView: NSView {
 
     /// Number of stacked lines this row currently shows — the folder always, the
     /// title when it has one, the context readout when that is on. The card sizes
-    /// the row from this, and `layout()` stacks exactly these lines.
+    /// the row from this, and `layout()` stacks exactly these lines. The
+    /// last-update stamp is not a line: it lives in line 1's right slot.
     var lineCount: Int { islandRowLineCount(hasTitle: hasTitleText, hasContext: hasContext) }
 
     // Geometry. This view lays its children out by frame — like the rest of the
@@ -3009,11 +3042,19 @@ private final class IslandRowView: NSView {
         contextLabel.textColor = NSColor.white.withAlphaComponent(0.5)
         contextLabel.lineBreakMode = .byTruncatingTail
 
+        // The stamp borrows the age's font, because it sits in the same right slot and
+        // the two have to measure and align as one; its tone is one step below the
+        // age's white 0.55 so the pair is never read as a single number.
+        stampLabel.font = NSFont.monospacedDigitSystemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        stampLabel.textColor = NSColor.white.withAlphaComponent(0.5)
+        stampLabel.alignment = .right
+        stampLabel.lineBreakMode = .byTruncatingTail
+
         // One field per line is the row's contract, so no field is ever allowed
         // to wrap onto the next line: each truncates at its tail instead. This is
         // belt-and-braces — `layout()` already gives every field a single-line
         // frame — but it makes the contract hold even if a frame were mis-sized.
-        for label in [nameLabel, titleLabel, durationLabel, contextLabel] {
+        for label in [nameLabel, titleLabel, durationLabel, contextLabel, stampLabel] {
             label.usesSingleLineMode = true
         }
 
@@ -3023,11 +3064,13 @@ private final class IslandRowView: NSView {
         addSubview(durationLabel)
         addSubview(contextGlyph)
         addSubview(contextLabel)
+        addSubview(stampLabel)
         addSubview(alertMark)
         addSubview(ring)
         titleLabel.isHidden = true
         contextGlyph.isHidden = true
         contextLabel.isHidden = true
+        stampLabel.isHidden = true
         alertMark.isHidden = true
         // Set once here and never again: the mark is not sized by a pill, it is sized to the disc the
         // row draws beside it (see `ringDiameter`).
@@ -3039,7 +3082,7 @@ private final class IslandRowView: NSView {
         fatalError("init(coder:) is not used")
     }
 
-    func configure(name: String, title: String?, status: SessionStatus, duration: String, pid: Int32?, context: IslandContext?) {
+    func configure(name: String, title: String?, status: SessionStatus, duration: String, pid: Int32?, context: IslandContext?, stamp: String) {
         self.pid = pid
         nameLabel.stringValue = name
         // The title is a line of its own, so it needs no separator and no width
@@ -3077,6 +3120,13 @@ private final class IslandRowView: NSView {
         } else {
             contextLabel.stringValue = ""
         }
+        // Cleared as well as hidden: `configure` also runs on a recycled view, so an
+        // empty stamp must not leave the previous session's age in the field. The
+        // separator is part of this field, not a gap in the layout, so it can never
+        // survive on its own at the end of the age.
+        hasStamp = !stamp.isEmpty
+        stampLabel.stringValue = hasStamp ? islandAgeStampSeparator + stamp : ""
+        stampLabel.isHidden = !hasStamp
         needsLayout = true
     }
 
@@ -3104,25 +3154,41 @@ private final class IslandRowView: NSView {
             height: max(0, bounds.height - islandAlertMarkVerticalInset * 2)
         )
 
-        // Line 1: status glyph, folder name, right-aligned age. The folder has
-        // the line to itself, so it is never truncated for a title — it simply
-        // fills the room the age leaves.
+        // Line 1: status glyph, folder name, and the right slot, which holds the
+        // session's age and — when the session has been updated since it was made
+        // — its last-update stamp. The folder has the line to itself, so it is
+        // never truncated for a title: it simply fills the room the slot leaves.
         glyph.frame = NSRect(x: islandRowLeadingInset, y: nameCenterY - islandRowGlyphSize / 2,
                              width: islandRowGlyphSize, height: islandRowGlyphSize)
         // The running mark takes exactly the glyph's box — same column, same centre, same size — so a
         // row switching between busy and any other state moves nothing and a busy row is not a
         // differently-sized row.
         ring.frame = glyph.frame
+        // The stamp is anchored by its own right edge, so its measured width appears
+        // to its left and it never leaves the row's trailing inset. It carries the
+        // separator in its text, so the two numbers are laid out as one string here
+        // and can never drift apart or end up separated by a truncating folder.
+        let stampWidth = hasStamp ? islandLabelWidth(for: stampLabel) : 0
+        let stampSize = stampLabel.intrinsicContentSize
+        stampLabel.frame = NSRect(
+            x: bounds.width - islandRowTrailingInset - stampWidth,
+            y: nameCenterY - stampSize.height / 2,
+            width: stampWidth,
+            height: stampSize.height
+        )
         let durationSize = durationLabel.intrinsicContentSize
         // Right-aligned age. Its width comes from the text's *unclipped* need,
         // not the bare advance — otherwise the cell clips the trailing glyph
         // inside the label (`5h36m` loses ~0.8pt off the `m`). Anchoring the
         // frame's right edge keeps the alignment, so the extra room appears to
         // its left, which costs the folder name the same hair via `nameWidth`
-        // below.
+        // below. With no stamp that edge is the row's trailing inset, exactly as
+        // before the stamp existed; with one it is the stamp's left side less the
+        // separator gap.
         let durationWidth = islandLabelWidth(for: durationLabel)
+        let durationRight = hasStamp ? stampLabel.frame.minX - islandAgeStampGap : bounds.width - islandRowTrailingInset
         durationLabel.frame = NSRect(
-            x: bounds.width - islandRowTrailingInset - durationWidth,
+            x: durationRight - durationWidth,
             y: nameCenterY - durationSize.height / 2,
             width: durationWidth,
             height: durationSize.height
@@ -3154,7 +3220,8 @@ private final class IslandRowView: NSView {
                 // dropdown, whose detail-row badge aligns under the status glyph —
                 // while the text lines up under the session name. The text x is
                 // fixed even when there is no band glyph, so alignment never
-                // shifts.
+                // shifts. The line is the context's alone: the stamp belongs to
+                // line 1's right slot, so nothing here competes for width.
                 contextGlyph.frame = NSRect(x: islandRowLeadingInset, y: centreYValue - islandRowGlyphSize / 2,
                                             width: islandRowGlyphSize, height: islandRowGlyphSize)
                 let size = contextLabel.intrinsicContentSize

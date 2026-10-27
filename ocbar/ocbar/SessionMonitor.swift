@@ -146,7 +146,9 @@ class SessionMonitor {
 
             guard let pid = sessionIDToPID[id] else { continue }
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
-            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid, sessionTitle: s["title"] as? String, createdAt: created))
+            sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid,
+                                        sessionTitle: s["title"] as? String,
+                                        createdAt: created, updatedAt: updated))
         }
 
         // A revert/fork leaves the original session behind as a separate root.
