@@ -145,6 +145,14 @@ private let islandCardBaseFontSize: CGFloat = 12.5
 /// subordinate tier cannot drift apart — the button is *of* that tier, not merely near it.
 private let islandCardSecondaryFontSize: CGFloat = 11
 
+/// The card's ground — **opaque black**, and the card's only fill, so this one number decides whether the
+/// wallpaper reads through the surface. It used to be α0.94, and that six percent was a real reading cost:
+/// a bright wallpaper shifted the card's tone and knocked the whole α0.5–0.7 text ladder below it down
+/// with it, on the display where the island is looked at most, for no gain — the card stands in for the
+/// notch, and a notch has no wallpaper behind it. Nothing else here is translucent by design except the
+/// no-cutout screen's 1px α0.08 edge, which is a border, not the ground.
+private let islandCardFillAlpha: CGFloat = 1
+
 /// The card's hover wash: the fill and geometry a session row takes under the pointer, and the tone the
 /// alert's button **returns to** on hover. One construction, so the card cannot end up with two hover
 /// idioms that drift: the row builds it as a path in its own `draw`, the button as a layer behind its
@@ -1670,7 +1678,7 @@ private final class IslandCardView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let radius = min(cornerRadius, min(bounds.width, bounds.height) / 2)
         let path = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
-        NSColor.black.withAlphaComponent(0.94).setFill()
+        NSColor.black.withAlphaComponent(islandCardFillAlpha).setFill()
         path.fill()
         if squareTopCorners {
             // Flatten the top: merges with the notch / the screen's top edge.
