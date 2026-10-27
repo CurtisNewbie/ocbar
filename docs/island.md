@@ -1,0 +1,23 @@
+# The island surface and the card
+
+The island's window, its per-screen behaviour and its expanded card, with the invariants a change to any of them could break.
+
+The island is a third surface beside the menubar item and the bubble: a borderless, non-activating `NSPanel` at `NSWindow.Level(mainMenuWindow + 2)`, top-anchored, **one panel per attached screen** — `IslandHost` keeps one `IslandPanel` per `NSScreen.screens`, rebuilding the set on `didChangeScreenParametersNotification`, so only a change to the *set* of displays rebuilds and a removed display's panel is `retire()`d. The alert is deliberately **not** replayed onto a newly attached display: a rebuild retires the old panels, which folds them. On a screen with a notch the panel anchors to the **cutout**, not to screen centre (`auxiliaryTopLeftArea`/`auxiliaryTopRightArea` for its width, `safeAreaInsets.top` for its height); with no cutout it becomes a top-centred stand-in capsule ([`island-pill.md`](island-pill.md) owns its width and floor).
+
+Hover grows the pill into a rounded card **500pt** wide (`islandExpandedCardTargetWidth`), sized so it truncates none of the real session titles, bounded to `0.8 × screen width`, floored at the capsule — sized by its *titles*, so widening it to restore an older ratio would only add black.
+
+A row is **up to three stacked lines** — folder name + right-aligned age / title / context usage — never two fields on one line; each absent line collapses the row, so `islandRowHeight(lines:)` = `30 + 14 × (lines − 1)` is one source of truth for the card's layout, the height budget and the window frame.
+
+**The card's top inset differs by state, and only the expanded side may move.** Collapsed `rowInset` 8; expanded `topInset` (the cutout's height) or 8, **plus `islandExpandedTopPadding` 8**, so the first row's *frame* clears the cutout's bottom edge and not just its text. The collapsed 8 must **not** move with it: 8 being *smaller* than the stand-in capsule's 24pt is what puts the collapsed rows inside the collapsed rect, which is what `hoverLatched` reasons about ([`island-alert.md`](island-alert.md)).
+
+**The list is capped by a height budget, not a row count** (`IslandListBudget`): height = `contentTop` + rows + `actionRowHeight` + `bottomPadding` (+ `summaryRowHeight` when folded), and the row budget is the smaller of 40% of the usable height and the room to the bottom of the usable area less that chrome — chrome never costs a visible row. The tail is an inert `+k more` row; folding is safe only because the list is re-ranked `error < waiting < busy < idle` (stably, in `attentionRanked`) with the first row always taken, so a fold can never hide an error behind an idle row.
+
+`IslandCardView.hitTest` hands clicks only to session rows and — while an alert is armed — to the `Hide` button in its own frame; the summary is inert. **A row click is answered by the host, not the panel:** `onRowActivated` → `IslandHost.rowActivated`, which folds **every** screen's island first, then calls `onSelectSession(pid)` → `SessionMonitor.focusSession`.
+
+The card's third line is the dropdown's own readout, so the two surfaces cannot disagree — [`context-usage.md`](context-usage.md) owns that rule and the trap behind it.
+
+**`AppDelegate.render` pushes `[IslandRow]` on every poll tick**, fanning one list to every screen's panel; the push hops to the main actor (`Task { @MainActor in }`) because `render` is nonisolated while the host and panels are `@MainActor`, and `menuWillOpen` calls the host's `collapse()`, collapsing **all** of them. Menu → "Show island" (`ocbar.island`, default on) toggles them; with no rows (or disabled) every panel is out.
+
+Three non-obvious requirements, each a real bug here: **hover is polled** — a 0.15s `NSEvent.mouseLocation` check against the *target* rect, **not** `NSTrackingArea`, whose `.inVisibleRect` area the window-resize animation tears down and rebuilds, synthesising enter/exit pairs while the pointer never moves (it oscillated the island forever); the expand/collapse delays are **one-shot** and guarded (`expandWork == nil` / `collapseWork == nil`), since the poll re-runs every 0.15s and a naive cancel-and-reschedule pushes the 0.35s deadline back every tick; and the panel **must be keyable** (`canBecomeKey` true, `canBecomeMain` false) with every hit-testable view returning `acceptsFirstMouse == true` — a non-keyable non-activating panel of an inactive accessory app gets no mouse events at all, so the pill click, the row click and the `Hide` button are silently dead while hover still works.
+
+See also: [`island-pill.md`](island-pill.md), [`island-alert.md`](island-alert.md), [`../AGENTS.md`](../AGENTS.md).
