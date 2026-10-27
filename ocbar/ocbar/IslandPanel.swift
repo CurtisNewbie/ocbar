@@ -425,7 +425,9 @@ enum IslandAlertKind {
 /// and turning while any session is working and dim and still when none is, followed by
 /// the running badge); on the right "what needs me, most urgent first" (one badge per
 /// remaining state that has sessions). A badge is a status glyph plus the number of
-/// sessions in that status. On hover it drops an expanded card listing every session.
+/// sessions in that status. On hover it drops an expanded card listing every session —
+/// and, while an alert is armed, listing **only the session that just moved**, with the
+/// rest folded into the card's `+k more` footnote (`recomputeFold`).
 ///
 /// One instance belongs to one `NSScreen`; `IslandHost` owns the set of them.
 ///
@@ -486,13 +488,10 @@ final class IslandPanel {
         let actionRowChanged = syncActionRow()
 
         rows = newRows
-        recomputeFold(metrics: currentMetrics())
-        let signature = Self.signature(for: visibleRows, folded: foldedCount)
-        let contentChanged = signature != lastSignature
-        if contentChanged {
-            lastSignature = signature
-            rebuildRows()
-        }
+        // The fold and the rows it renders, from the same helper the alert's own arm/end use: the card's
+        // listed set is derived from `alertArmed` (`recomputeFold`), so both callers have to run exactly
+        // this and only this, or one of them would show a card the other's state disagrees with.
+        let contentChanged = refoldCard()
         refreshCollapsed()
         // Re-applied on *every* tick, not only when the alert is armed or the rows
         // changed: an alert normally arrives **before** the row list contains its
@@ -551,6 +550,13 @@ final class IslandPanel {
     /// The alert owns the card for `seconds` (see `armAlertTimer`), and when it
     /// ends it does not decide anything: it hands the card back to the hover
     /// machine, which is what kept the two from disagreeing in the first place.
+    ///
+    /// **While it is armed the card lists this one row and folds the rest away**
+    /// (`recomputeFold`): the alert is about a single transition, so the card is about a
+    /// single session. The fold is re-derived right here rather than left to the next
+    /// `update` tick, because an alert can land on a card the pointer already had open —
+    /// which would otherwise sit there showing the whole list, and marking one row, until
+    /// the next poll.
     func alert(name: String, kind: IslandAlertKind, pid: Int32?, seconds: TimeInterval) {
         alert = ActiveAlert(name: name, kind: kind, pid: pid)
         alertGeneration += 1
@@ -562,13 +568,20 @@ final class IslandPanel {
         // is what makes every pending deadline the alert's to keep or drop.
         cancelPending()
         armAlertTimer(seconds: seconds)
+        // The chrome first, then the rows: the action row is alert-only, and an alert landing on an
+        // already-open card has to grow that card rather than push a button past its bottom edge.
+        let chromeChanged = syncActionRow()
+        // And the rows with it: the card is now about one session, so the list is re-derived here —
+        // this is also what makes a re-arm on a *different* session swap the row, while a re-arm on
+        // the same one is a no-op here and lands entirely on the mark below.
+        let contentChanged = refoldCard()
         // Mark first, expand second: the mark lives inside a row that the
         // expansion is still fading in, so the two arrive together instead of one
         // after the other.
         applyAlertMark()
-        // …and the action row with them: it is alert-only chrome, and an alert landing on an already-open
-        // card has to grow that card rather than push a button past its bottom edge.
-        if syncActionRow() { resizeOpenCard() }
+        // Both changes move an open card's height — the chrome adds a row's worth, the scoped list
+        // takes it back — so one resize serves both, top edge anchored.
+        if chromeChanged || contentChanged { resizeOpenCard() }
 
         // Nothing on screen yet. The rows for this session arrive on the render
         // tick that follows the transition, and the tail of `update` opens the
@@ -576,9 +589,9 @@ final class IslandPanel {
         // than waiting. A card that never arrives is not awaited forever either:
         // the timer ends the alert regardless.
         guard visible else { return }
-        // Already open because the pointer is on it. The mark, the action row and the timer are then the
-        // whole alert: the frame has nowhere else to move, and replaying the open would restart the fade
-        // for no reason.
+        // Already open because the pointer is on it. The mark, the action row, the narrowed list and the
+        // timer are then the whole alert: the frame has nowhere else to move, and replaying the open would
+        // restart the fade for no reason.
         guard !expandedState else { return }
         setExpanded(true, animated: true, duration: alertExpandDuration)
     }
@@ -610,10 +623,12 @@ final class IslandPanel {
     private var rowViews: [IslandRowView] = []
 
     private var rows: [IslandRow] = []
-    /// The prefix of `rows` that fits the height budget, and how many were
+    /// The prefix of the card's *listed* rows that fits the height budget, and how many were
     /// folded into the summary. Both are recomputed every tick from the current
     /// screen, and are the single source of truth for the card's layout, the
-    /// window frame and the summary text.
+    /// window frame and the summary text — and the listed set is itself derived there
+    /// from the alert (`recomputeFold`), so an armed alert's one row and the
+    /// `+k more` count that replaces the rest come off the same calculation.
     private var visibleRows: [IslandRow] = []
     private var foldedCount = 0
     private var lastSignature: String?
@@ -931,6 +946,18 @@ final class IslandPanel {
         card.bottomPadding = bottomPadding
         card.onClick = { [weak self] in
             guard let self else { return }
+            // **An armed alert is not folded by a blank click.** Everything that reaches this closure is
+            // "not a session row, not the `Hide` button" — the card's margins, and the inert `+k more`
+            // footnote, which this same path claims because `hitTest` deliberately lets the summary fall
+            // through. On a hover card that is the way out (the pointer is on the card because the user put
+            // it there), but an unprompted card has one way out and it is visible: `Hide`. Folding on a
+            // stray click would end the reminder silently — `setExpanded(false)` neither latches the hover
+            // open off nor ends the alert, so the card would sit armed and unseen, or, if the pointer
+            // happened to stay inside the collapsed hover rect, pop back 0.35s later off the 0.15s poll:
+            // one click, two outcomes. It is made no click at all. Clicking a *collapsed* card to open it
+            // still works — while an alert is armed only `collapse()` folds the card, and that ends the
+            // alert, so this guard only ever refuses the fold.
+            guard !(self.alertArmed && self.expandedState) else { return }
             self.setExpanded(!self.expandedState, animated: true)
         }
 
@@ -957,12 +984,50 @@ final class IslandPanel {
     /// on the panel so the card, the window frame and the summary text all come
     /// from the same split. Each row contributes its own height, so a list of
     /// one-line rows shows more rows than a list of three-line ones.
+    ///
+    /// **An armed alert narrows the card to one session.** `alertArmed` and its pid are part of this
+    /// computation, and not a second list computed beside it: an unprompted card exists because *one*
+    /// session moved, so showing the full attention-ranked list would make the user hunt for the row that
+    /// did — the alert would open a card and then make its own point the fourth row down. Instead the
+    /// alerted row *is* the list and every other session folds into the `+k more` summary, whose count is
+    /// therefore `ranked.count - 1`. The row goes through the budget below like any other (it is simply
+    /// never the one that folds, since a list of one always fits), so the card, the window frame and the
+    /// summary text still come from this one split.
+    ///
+    /// When the alert cannot be pinned to a row — a nil pid, or a pid that is not in this tick's list
+    /// because the session is filtered out or unbound — the card falls back to the **whole ranked list,
+    /// exactly as a hover card shows it**, and marks nothing. That is the one rule this may not break: a
+    /// card that opened must never open empty, and an alert with nowhere to point is still a card the user
+    /// has to be told about. A card armed while the island is off screen lands here with no rows at all and
+    /// scopes on the first tick that has the row (`update`).
     private func recomputeFold(metrics: ScreenMetrics) {
         let ranked = Self.attentionRanked(rows)
-        let heights = ranked.map(Self.rowHeight(for:))
+        // The rows this card is allowed to list, and the sessions already folded away before the budget is
+        // applied — 0, or the rest of the list when an alert pinned one row out of it.
+        let listed: [IslandRow]
+        let foldedAway: Int
+        if let focused = alertScopedIndex(in: ranked) {
+            listed = [ranked[focused]]
+            foldedAway = ranked.count - 1
+        } else {
+            listed = ranked
+            foldedAway = 0
+        }
+        let heights = listed.map(Self.rowHeight(for:))
         let budget = listBudget(for: metrics, tallestRowHeight: heights.max() ?? islandRowOneLineHeight)
-        visibleRows = Array(ranked.prefix(budget.visibleCount(forRowHeights: heights)))
-        foldedCount = max(0, ranked.count - visibleRows.count)
+        visibleRows = Array(listed.prefix(budget.visibleCount(forRowHeights: heights)))
+        foldedCount = max(0, foldedAway + listed.count - visibleRows.count)
+    }
+
+    /// The alerted row's position in the ranked list, or nil when the alert cannot be pinned to one.
+    ///
+    /// That is the whole scope: no alert (so no pid at all), a nil pid — the session is bound to no running
+    /// client, so there is no row the mark could be about — or a pid absent from this tick's list. The
+    /// caller reads nil as "show the whole list" (`recomputeFold`), which is what keeps an unmatched alert
+    /// from opening an empty card.
+    private func alertScopedIndex(in ranked: [IslandRow]) -> Int? {
+        guard let pid = alert?.pid else { return nil }
+        return ranked.firstIndex { $0.pid == pid }
     }
 
     /// Height budget for the current screen and row set.
@@ -1397,12 +1462,45 @@ final class IslandPanel {
         alertWork?.cancel()
         alertWork = nil
         alert = nil
+        // The alert is off, so the card is no longer scoped to one session: the fold is re-derived here
+        // for the same reason `alert(...)` re-derives it, because `alertArmed` is this calculation's input
+        // and the alert's own timer ends it with no `update` tick in sight. **The full list comes back
+        // immediately, not on the next fold.** Holding the scoped list until the card folded was the other
+        // candidate and is not expressible: with the alert gone, `recomputeFold` already returns the whole
+        // list on the very next poll tick, so a hold would need a second flag duplicating the fold this
+        // file insists has one source — and the card would swap from `+k more` to five rows up to half a
+        // second later, on a tick about something else, which reads as a flicker. Restoring here means the
+        // card the pointer is still reading grows back in the same frame the mark leaves.
+        let contentChanged = refoldCard()
         applyAlertMark()
         // The alert's chrome goes with the alert — the `Hide` button exists only while one is armed — and
         // that is a height change like any other, so an open card resizes. It is not a fold: `endAlert` and
         // `retractAlert` leave the card to the hover machine, which is what makes this the one exit that
-        // shrinks an open card rather than closing it. (`collapse` folds first, so this is a no-op there.)
-        if syncActionRow() { resizeOpenCard() }
+        // shrinks an open card rather than closing it. (`collapse` folds first, so this is a no-op there —
+        // `resizeOpenCard` is guarded on `expandedState`, and the restored rows come back invisibly for the
+        // next open.)
+        if syncActionRow() || contentChanged { resizeOpenCard() }
+    }
+
+    /// Re-derive the fold from the panel's current state — the rows, and the alert that may scope them —
+    /// and rebuild the card's rows when that changed what is rendered. Reports whether the rendered content
+    /// changed, so an open card can be resized to its new height.
+    ///
+    /// The one place a fold becomes a card. `update` runs it every poll tick, and the two moments an alert
+    /// *starts* and *ends* run it too, because those flip the scope without necessarily being followed by an
+    /// `update` that carries the rows — an alert normally arrives *before* the row list contains its session,
+    /// and it can also land on a card the pointer already had open — so waiting up to half a second for the
+    /// poll would leave a stale card on screen. An unchanged signature is a no-op, which is what keeps a
+    /// re-arm on the *same* row from rebuilding anything: that case is the mark's, and the mark is re-applied
+    /// by the caller either way.
+    @discardableResult
+    private func refoldCard() -> Bool {
+        recomputeFold(metrics: currentMetrics())
+        let signature = Self.signature(for: visibleRows, folded: foldedCount)
+        guard signature != lastSignature else { return false }
+        lastSignature = signature
+        rebuildRows()
+        return true
     }
 
     /// Mark the alerted row and clear the mark from every other row.
@@ -1414,9 +1512,12 @@ final class IslandPanel {
     ///
     /// Marked rows are matched by pid, which is the exact client↔session binding
     /// (`SessionMonitor`), so the mark can only ever land on the session that
-    /// actually transitioned. A nil pid — or a session whose row is folded into
-    /// `+k more` — simply leaves no row marked, which is the honest outcome: the
-    /// card has opened and the mark has nowhere to be.
+    /// actually transitioned. While an alert is armed its row is also the card's
+    /// only row (`recomputeFold`), so the two cannot disagree: the row that is shown
+    /// is the row that is marked, and the pop lands where the eye already is. A nil
+    /// pid — or a pid that is not in this tick's list — is the one case where the
+    /// card falls back to the whole list and no row is marked, which is the honest
+    /// outcome: the card has opened and the mark has nowhere to be.
     private func applyAlertMark() {
         let current = alert.map { IslandRowAlert(tint: $0.kind.color, generation: alertGeneration) }
         for (index, row) in visibleRows.enumerated() where index < rowViews.count {
@@ -1520,7 +1621,9 @@ private final class IslandCardView: NSView {
     // dots still toggle, without relying on responder-chain forwarding). The
     // summary is deliberately not a candidate, so it stays inert as a row; the
     // alert's action row is, but only inside its own frame — the card's blank
-    // area must keep toggling the island everywhere else.
+    // area must keep toggling the island everywhere else (`onClick` itself refuses
+    // that toggle while an alert is armed, which is where the alert's one-way-out
+    // is kept, not here).
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard bounds.contains(local) else { return nil }
