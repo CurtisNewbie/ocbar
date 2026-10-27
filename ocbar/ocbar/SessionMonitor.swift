@@ -31,8 +31,9 @@ class SessionMonitor {
 
     /// A root session is shown while its work is active/waiting, or if it has
     /// been viewed and the later of its last view and last activity is newer
-    /// than this window.
-    private static let recentWindow: TimeInterval = 1800
+    /// than this window. 12h: a session parked overnight should still be in the
+    /// island when the user comes back to it.
+    private static let recentWindow: TimeInterval = 43200
 
     init(onStateChange: @escaping (AppState) -> Void) {
         self.onStateChange = onStateChange

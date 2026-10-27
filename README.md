@@ -39,7 +39,7 @@ Shows a live status indicator in your menubar so you know when agents finish wit
 - A session is shown only while its exact id is bound to a live `opencode` client (TUI or CLI) — client-less orphaned sessions are ignored
 - Only root sessions (top-level sessions you interact with, not subagent children) are shown, labeled by project folder name. The menubar shows folder names only, so duplicate folders render identically; in the dropdown menu, several roots can share a directory, each shown as its own row, and rows that share a folder are told apart by the session title (or a short id suffix when titles are off or the session has no title)
 - Binding comes from the `ocbar-bridge` TUI plugin, which runs inside each OpenCode client and reports, live, the session that client is actually driving (pid ↔ session); ocbar prefers that report. Parsing the client's command line (`opencode --session <id>`, via `ps` argv) is only a fallback for clients without the plugin. Either way there is no directory-level fallback: a client that is in no session, or carries no id and has no plugin report, is simply not bound (see Limitations)
-- A session is listed while its own or a descendant's work is busy/waiting. Once a client has viewed it, it stays listed until 30 minutes after the later of its last view and its last activity. Unviewed sessions (for example a headless `opencode run`) are therefore only listed while they are busy or waiting
+- A session is listed while its own or a descendant's work is busy/waiting. Once a client has viewed it, it stays listed until 12 hours after the later of its last view and its last activity. Unviewed sessions (for example a headless `opencode run`) are therefore only listed while they are busy or waiting
 
 ## Limitations
 

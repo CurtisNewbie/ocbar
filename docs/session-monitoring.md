@@ -16,7 +16,7 @@ This file documents how ocbar finds the OpenCode service, decides which sessions
 One rule, in three parts:
 
 - **Root only.** Only root sessions (`parentID == nil`, not archived) are considered. Each root's status is derived from the union of itself and its descendants: waiting if any descendant is waiting, else busy if any is active, else error when the root's own `outcome == "failed"`, else idle.
-- **Recently relevant.** A root appears while its own or a descendant's work is busy/waiting, or once it has been viewed and `max(viewed, updated)` is within `recentWindow` (1800s = 30 min). An unviewed session — for example a headless `opencode run` — therefore shows only while it is busy or waiting.
+- **Recently relevant.** A root appears while its own or a descendant's work is busy/waiting, or once it has been viewed and `max(viewed, updated)` is within `recentWindow` (43200s = 12 h). An unviewed session — for example a headless `opencode run` — therefore shows only while it is busy or waiting.
 - **Bound.** A root appears only if a running client is bound to it by exact session id (`guard let pid = sessionIDToPID[id]` in `SessionMonitor.publish`'s fetch path). Client-less orphaned sessions — e.g. one blocked on a permission prompt with no terminal attached — are dropped here.
 
 Sessions are never collapsed per directory: every bound root is emitted as its own row. A root that a visible session was forked from is hidden, so one project does not show two identical rows.
