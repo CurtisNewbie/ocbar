@@ -167,8 +167,9 @@ private let islandCardSecondaryFontSize: CGFloat = 11
 /// wallpaper reads through the surface. It used to be α0.94, and that six percent was a real reading cost:
 /// a bright wallpaper shifted the card's tone and knocked the whole α0.5–0.7 text ladder below it down
 /// with it, on the display where the island is looked at most, for no gain — the card stands in for the
-/// notch, and a notch has no wallpaper behind it. Nothing else here is translucent by design except the
-/// no-cutout screen's 1px α0.08 edge, which is a border, not the ground.
+/// notch, and a notch has no wallpaper behind it. Nothing else here is translucent at all: the surface has
+/// no border on any display (it used to carry a 1px α0.08 edge on a cutout-less screen), so this one
+/// number really is the whole of the island's ground.
 private let islandCardFillAlpha: CGFloat = 1
 
 /// The card's hover wash: the fill and geometry a session row takes under the pointer, and the tone the
@@ -299,14 +300,15 @@ private let islandPlainCollapsedHeight: CGFloat = 24
 ///
 /// **Floored again by what it has to hold**, and that floor is load-bearing: the share alone is
 /// 0.14 × screenWidth, so a 1024pt-wide display asks for 143pt and clamps up to the 160 floor —
-/// and the block that capsule holds in its worst case (ring + four two-digit badges + the gaps
-/// between them, `CollapsedContentView.standInCapsuleMinWidth` = 191) is *wider than 160*. That
-/// is the silent-failure shape this pill is built to avoid: `place` centres what it can and the
-/// view's mask trims the rest, so the finished count would be drawn as `1`. The content floor is
-/// therefore a floor on top of the fraction, not a replacement for it — on the maintainer's
-/// 1512pt display the share (211.7) is still what sets the width, and the floor only ever lifts
-/// a small display (a 1366pt one asks for 191.2, so it is lifted there too; the 240 cap still
-/// holds, so the capsule can never become a band).
+/// and the block that capsule holds in its worst case (ring + the three two-digit badges + the
+/// bare two-digit running count + the gaps between them,
+/// `CollapsedContentView.standInCapsuleMinWidth` = 172) is *wider than 160*. That is the
+/// silent-failure shape this pill is built to avoid: `place` centres what it can and the view's
+/// mask trims the rest, so the finished count would be drawn as `1`. The content floor is
+/// therefore a floor on top of the fraction, not a replacement for it — on a 1512pt display the
+/// share (211.7) is what sets the width, the floor only ever lifts a smaller one (below 1228pt
+/// the share is under 172), and the 240 cap binds from 1714pt up, so the capsule can never
+/// become a band.
 func islandStandInCapsuleWidth(screenWidth: CGFloat) -> CGFloat {
     let share = min(max(screenWidth * fakeNotchFraction, fakeNotchMinWidth), fakeNotchMaxWidth)
     return max(share, CollapsedContentView.standInCapsuleMinWidth)
@@ -1321,9 +1323,8 @@ final class IslandPanel {
     private func applyAppearance(expanded: Bool, metrics: ScreenMetrics, animated: Bool, duration: TimeInterval? = nil) {
         guard let card, let collapsedView else { return }
         card.cornerRadius = cornerRadius(expanded: expanded, metrics: metrics)
-        // Flush against the top edge: square top corners so the pill merges
-        // with the notch / screen edge instead of showing a sliver behind it.
-        card.squareTopCorners = metrics.notched
+        // Flush against the top edge: the card's own `draw` squares the top corners on every
+        // display — see there for why the shape does not vary with the screen.
         card.contentTop = expanded ? contentTop(for: metrics) : rowInset
         card.rowViews = rowViews
         card.needsLayout = true
@@ -1618,9 +1619,6 @@ private final class IslandCardView: NSView {
     var cornerRadius: CGFloat = 12 {
         didSet { if cornerRadius != oldValue { needsDisplay = true } }
     }
-    var squareTopCorners = false {
-        didSet { if squareTopCorners != oldValue { needsDisplay = true } }
-    }
 
     override var isFlipped: Bool { true }
 
@@ -1707,14 +1705,13 @@ private final class IslandCardView: NSView {
         let path = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
         NSColor.black.withAlphaComponent(islandCardFillAlpha).setFill()
         path.fill()
-        if squareTopCorners {
-            // Flatten the top: merges with the notch / the screen's top edge.
-            let strip = NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: radius + 0.5)
-            NSBezierPath(rect: strip).fill()
-        } else {
-            NSColor.white.withAlphaComponent(0.08).setStroke()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius).stroke()
-        }
+        // Flatten the top: the surface hangs from the screen's top edge on **every** display, so a
+        // rounded top corner there is a corner no one can see a use for, and on a notched display it
+        // would leave black gaps beside the cutout. One shape for both kinds of screen — a flat top
+        // and rounded bottom — so the pill does not change shape when the pointer moves between
+        // displays. No stroke: an edge is a border, and this surface's only edge is the screen's.
+        let strip = NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: radius + 0.5)
+        NSBezierPath(rect: strip).fill()
     }
 }
 
