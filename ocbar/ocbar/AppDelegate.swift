@@ -51,6 +51,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menu: NSMenu!
     private var lastSessions: [SessionInfo]? = nil
     private var currentState = AppState()
+    /// The app that hosts the currently armed alert's session terminal — resolved at arm time,
+    /// because it takes a process walk — so an activation of it can cut the hold short. nil while
+    /// nothing is armed, and cleared on every arm so one alert's host can never shorten the next.
+    private var alertHostAppPID: pid_t?
+
     private var bubble: StatusBubble!
     private var island: IslandHost!
     private var runningMarkTimer: Timer?
@@ -60,6 +65,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Reduce Motion changes have to reach the menubar's mark without waiting for the next poll tick:
     /// turning it on stops the rotation at the resting angle, and turning it off starts it again.
     private var reduceMotionObserver: NSObjectProtocol?
+    /// Fires on every app activation, so an armed island alert notices the user bringing its
+    /// terminal forward (`terminalActivated(_:)`).
+    private var activationObserver: NSObjectProtocol?
     private var busyMenuItems: [NSMenuItem] = []
     private var busyTitleAttachments: [NSTextAttachment] = []
     private var currentButtonTitle: NSAttributedString?
@@ -73,7 +81,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let bubbleEnabledKey = "ocbar.bubble"
     private let alertSoundKey = "ocbar.alertSound"
     private let islandEnabledKey = "ocbar.island"
+    /// Opt-in: cut an island alert's hold short when the terminal hosting the session is showing it.
+    /// Off by default — the check can only claim "the app is in front and its tmux session shows this
+    /// pane", never which *tab* across different tmux sessions is in front (see
+    /// `SessionMonitor.terminalHostAppPID(forClient:)`).
+    private let alertFocusedFoldKey = "ocbar.alertFocusedFold"
     private let defaultBubbleSeconds = 10
+    /// How long an alert the user has plausibly already seen stays up. Not the bubble's duration:
+    /// the point of shortening is that the transition happened in front of them, so the card only
+    /// has to be caught out of the corner of an eye.
+    private let alertFocusedSeconds: TimeInterval = 2
     private let contextUsageKey = "ocbar.contextUsage"
     private let contextUsageDisplayKey = "ocbar.contextUsageDisplay"
     private let contextUsageWarnKey = "ocbar.contextUsageWarn"
@@ -142,6 +159,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] _ in
             self?.updateRunningMark()
         }
+        // An armed island alert's hold can be cut short by an app activation: the user bringing the
+        // terminal forward is that event, so it needs no poll — see `terminalActivated(_:)`.
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            self?.terminalActivated(note)
+        }
         monitor.start()
         render(AppState())
     }
@@ -191,6 +217,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(alertSoundMenu())
         menu.addItem(islandMenu())
         menu.addItem(islandHoverDelayMenu())
+        menu.addItem(alertFocusedFoldMenu())
         menu.addItem(showSessionTimeMenu())
         menu.addItem(showSessionTitlesMenu())
         menu.addItem(contextUsageMenu())
@@ -797,6 +824,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         render(currentState, forceMenuRefresh: true)
     }
 
+    /// Opt-in, beside the island's toggle: an alert whose session terminal is already in front is
+    /// cut to `alertFocusedSeconds` instead of the bubble's duration. The other reminders (the
+    /// bubble, the sound) are untouched — this is only about how long the island holds a card the
+    /// user is plausibly looking at anyway.
+    private var alertFocusedFold: Bool {
+        UserDefaults.standard.bool(forKey: alertFocusedFoldKey)
+    }
+
+    private func alertFocusedFoldMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Fold alert when terminal focused",
+                              action: #selector(alertFocusedFoldToggled(_:)), keyEquivalent: "")
+        item.target = self
+        item.state = alertFocusedFold ? .on : .off
+        return item
+    }
+
+    @objc private func alertFocusedFoldToggled(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(!alertFocusedFold, forKey: alertFocusedFoldKey)
+        // Switching it off must not leave a host from an alert that is still up to be shortened the
+        // moment the user activates it: `terminalActivated` checks the setting too, but clearing the
+        // host is the state the setting is about.
+        if !alertFocusedFold { alertHostAppPID = nil }
+        render(currentState, forceMenuRefresh: true)
+    }
+
     /// The island's own timing, sitting next to the island's own toggle: how long the pointer has to
     /// rest on the pill before the card opens. The fold is not this menu's — it is fixed at 0.2s inside
     /// `IslandPanel` (`hoverCloseDelay`), since leaving an open card is a decision the pointer has
@@ -1119,7 +1171,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let seconds = TimeInterval(bubbleSeconds)
             // `name` is the folder's display name, which is also what `dismissReminders` matches on when
             // the reminder's reason goes away — the same key the bubble uses.
+            //
+            // The alert is armed first and *then* checked against the frontmost app, because the
+            // check costs a process walk. `shortenAlertIfTerminalFocused` therefore arms nothing:
+            // it only cuts a hold that is already up (`IslandPanel.shortenAlert`).
+            alertHostAppPID = nil
             Task { @MainActor [island] in island?.alert(name: name, kind: kind, pid: pid, seconds: seconds) }
+            shortenAlertIfTerminalFocused(clientPID: pid)
         }
         // "Alert sound" is its own setting and is not owned by either surface: it
         // rings whenever one of them is going to show something. `.off` is the
@@ -1129,6 +1187,55 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// **The alert's one early fold, and the only one the user does not have to answer:** the terminal this
+    /// session runs in was already showing it when the alert fired, so the transition happened in front of
+    /// them and the card has no reason to hold for the bubble's full duration. The hold is cut to
+    /// `alertFocusedSeconds` on every screen (`IslandHost.shortenAlert(to:)`). It is not a fourth exit:
+    /// only the timer's deadline moves, and the alert still ends in `clearAlert()` alone.
+    ///
+    /// **What the check claims, and what it cannot.** Two halves, and both must hold: the app hosting
+    /// the session's terminal is `NSWorkspace.frontmostApplication`, and — for a tmux pane — tmux says
+    /// that pane is the one its session is showing (`SessionMonitor.terminalHostAppPID(forClient:)`).
+    /// The pane half is load-bearing: "Ghostty is in front" alone folded cards for sessions sitting in
+    /// a background tmux window, since every pane shares the app. What is still not knowable is the
+    /// **tab across sessions** — a terminal with two tabs attached to different tmux sessions cannot
+    /// say which is in front without Accessibility (never requested) or a per-terminal AppleScript
+    /// (Ghostty 1.3 dropped the `tty` property this file's `focusCommand` was written against) — hence
+    /// `ocbar.alertFocusedFold` defaults to off.
+    ///
+    /// The pid is resolved off the main thread (a `ps` table, and one `tmux` script for a pane) and
+    /// only when the setting is on, so the default costs nothing at all. The answer is also remembered
+    /// as `alertHostAppPID`: an alert that fired in the background is cut short the moment the user
+    /// brings that app forward (`terminalActivated(_:)`) rather than running out its remaining seconds.
+    private func shortenAlertIfTerminalFocused(clientPID: Int32?) {
+        guard alertFocusedFold, let clientPID else { return }
+        Task { @MainActor [weak self] in
+            let host = await Task.detached(priority: .utility) {
+                SessionMonitor.terminalHostAppPID(forClient: clientPID)
+            }.value
+            guard let self else { return }
+            self.alertHostAppPID = host
+            guard let host,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == host else { return }
+            self.island.shortenAlert(to: self.alertFocusedSeconds)
+        }
+    }
+
+    /// The user brought (some) app forward while an island alert was armed: if it is the app that hosts
+    /// the alert's terminal, they are now looking at the session the card is about, so cut its remaining
+    /// hold. Event-driven and not polled, because "the terminal came to the front" *is* an activation —
+    /// no timer has to look for it.
+    ///
+    /// `shortenAlert` ignores a request that would land later than the armed deadline, so repeated
+    /// activations (`click into the terminal`, `back and forth`) cannot keep pushing the fold out.
+    private func terminalActivated(_ notification: Notification) {
+        guard alertFocusedFold, let host = alertHostAppPID,
+              let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              app.processIdentifier == host else { return }
+        let seconds = alertFocusedSeconds
+        Task { @MainActor [weak self] in self?.island.shortenAlert(to: seconds) }
+    }
+
     /// The reason for a reminder is gone: the user answered the prompt, or the session went back to work
     /// (`SessionMonitor.onDismiss`, which fires for exactly those two, plus a session that disappears).
     /// Both surfaces are dismissed by the **same key** — the folder's display name — because that is what
@@ -1136,6 +1243,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func dismissReminders(projectDir: String) {
         let name = displayName(for: projectDir)
         bubble.dismiss(ifShowing: name)
+        // The alert this host was resolved for is over, so no activation may shorten a later one by it.
+        alertHostAppPID = nil
         // The island retracts its own way: it hands the card back to its hover machine rather than folding
         // it (an unattended card closes on the ordinary hover deadline, a card the user is pointing at
         // stays up), and it only touches a panel whose armed alert is this one. It is a `@MainActor` type

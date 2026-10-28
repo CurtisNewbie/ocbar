@@ -744,6 +744,12 @@ final class IslandPanel {
     /// it was armed for.
     private var alertWork: DispatchWorkItem?
 
+    /// When `alertWork` is due. Kept beside the work item because a hold can be **shortened** after
+    /// it is armed (`shortenAlert(to:)`, the terminal was already in front) and a shortening that
+    /// arrived twice must not extend the hold it already applied — the clock, not the second
+    /// request, decides. `distantPast` while nothing is armed.
+    private var alertDeadline = Date.distantPast
+
     /// Whether an alert currently owns the card, read by the hover poll to know
     /// that the fold is not its to make.
     private var alertArmed: Bool { alert != nil }
@@ -1547,13 +1553,41 @@ final class IslandPanel {
     /// still holding open — and a stack of them is how a card ends up open for as
     /// long as sessions keep transitioning.
     private func armAlertTimer(seconds: TimeInterval) {
+        armAlert(until: Date().addingTimeInterval(max(seconds, alertMinimumSeconds)))
+    }
+
+    /// Arm the alert's one-shot at an absolute deadline. The deadline is stored rather than the
+    /// duration because `shortenAlert(to:)` re-arms this same shot against it.
+    private func armAlert(until target: Date) {
         alertWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.endAlert()
         }
         alertWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(seconds, alertMinimumSeconds), execute: work)
+        alertDeadline = target
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(target.timeIntervalSinceNow, 0), execute: work)
+    }
+
+    /// Cut the alert's hold to `seconds` **from now**, because the user is already looking at the
+    /// terminal this alert is about — they saw the transition in the terminal itself, so the card
+    /// does not have to stand for the bubble's full duration to be noticed.
+    ///
+    /// **Only ever shortens, and only while an alert is armed.** `alertDeadline` is what makes it
+    /// idempotent: the caller can be an app-activation notice that fires more than once (bring the
+    /// terminal forward, click in it, come back), and a naive re-arm would push the fold three
+    /// seconds out on every one of them until the user stopped touching the terminal. A request
+    /// that would land *later* than the armed deadline is therefore ignored, not applied.
+    ///
+    /// It deliberately touches neither `alert`, nor `alertGeneration`, nor the rows: nothing about
+    /// *what* the card says changed, only how long it stays. Bumping the generation would replay
+    /// the row's pop (which is keyed on it) for a deadline change, and re-deriving the fold here
+    /// would be `clearAlert`/`alert`'s job, not this one's.
+    func shortenAlert(to seconds: TimeInterval) {
+        guard alertArmed else { return }
+        let target = Date().addingTimeInterval(max(seconds, alertMinimumSeconds))
+        guard target < alertDeadline else { return }
+        armAlert(until: target)
     }
 
     /// The alert's time is up: drop the mark and — this is the whole handover —
@@ -1578,6 +1612,7 @@ final class IslandPanel {
     private func clearAlert() {
         alertWork?.cancel()
         alertWork = nil
+        alertDeadline = .distantPast
         alert = nil
         // The alert is off, so the card is no longer scoped to one session: the fold is re-derived here
         // for the same reason `alert(...)` re-derives it, because `alertArmed` is this calculation's input
@@ -3824,6 +3859,18 @@ final class IslandHost {
     /// have plausibly already seen.
     func alert(name: String, kind: IslandAlertKind, pid: Int32?, seconds: TimeInterval) {
         for panel in panels { panel.alert(name: name, kind: kind, pid: pid, seconds: seconds) }
+    }
+
+    /// The alert's session had its terminal in front when it fired, or came to the front while the
+    /// alert was up: every screen's hold is cut short (`IslandPanel.shortenAlert(to:)`), on the same
+    /// fan-out as the alert itself — the reminder is shown on every screen, so the user having seen
+    /// it on one is the whole of the reason to let it go early.
+    ///
+    /// App-level on purpose: ocbar compares the *application* that hosts the session's tty, not the
+    /// terminal's focused tab. See `AppDelegate.shortenAlertIfTerminalFocused` for why that is the
+    /// honest line to draw, and `ocbar.alertFocusedFold` for why it is off by default.
+    func shortenAlert(to seconds: TimeInterval) {
+        for panel in panels { panel.shortenAlert(to: seconds) }
     }
 
     /// The alert's **reason** is gone — the user answered the prompt, or the session went back to work —

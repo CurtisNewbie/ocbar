@@ -574,6 +574,126 @@ class SessionMonitor {
         """
     }
 
+    // MARK: - Terminal host
+
+    /// One row of `ps -Ao pid=,ppid=,tty=,comm=`.
+    private struct ProcessEntry {
+        let pid: pid_t
+        let ppid: pid_t
+        let tty: String
+        let comm: String
+    }
+
+    /// The **application** that owns the terminal client `pid` runs in — Ghostty, Terminal, iTerm2,
+    /// VS Code — **and only when that terminal is actually showing the session**, or nil.
+    ///
+    /// This is what lets the island ask "is the user already looking at this session's terminal?",
+    /// which is a different question from the one `focusSession` answers: that one *moves* the
+    /// terminal, this one only reports where it is.
+    ///
+    /// **For a tmux pane the answer is gated on tmux's own view state**, not on the app being in
+    /// front (that is the caller's half of the check). A pane is shown only when it is the active
+    /// pane of the active window *and* a client is attached — `pane_active`, `window_active`,
+    /// `session_attached`, which is also what makes a focus in one split of the window count
+    /// correctly. Without that gate the check was "Ghostty is in front", and since every pane of a
+    /// session shares the app, a session sitting in a background window read as seen: the card
+    /// folded 3s in while the user was looking at something else entirely.
+    ///
+    /// What remains approximate is the *tab*, not the pane: a terminal with two tabs attached to
+    /// **different tmux sessions** cannot say which one is in front (a terminal's focused surface is
+    /// invisible from outside without Accessibility, which ocbar does not ask for, or a per-terminal
+    /// AppleScript — and Ghostty 1.3 dropped the `tty` property `focusCommand` was written against).
+    /// That residual case is why the shortener is opt-in (`ocbar.alertFocusedFold`).
+    ///
+    /// The walk is the ppid chain, with one hop for tmux: a pane's shell is a child of the tmux
+    /// *server*, which has been daemonized (ppid 1), so the chain from the client never reaches the
+    /// terminal at all. The terminal's tty is then the **client's** tty (`tmux list-clients`), and
+    /// the process holding it is a child of the app — the same routing `focusCommand` uses to find
+    /// the window, reused here to find the app. Outside tmux the client's own tty chain is used, and
+    /// the pane question cannot be asked at all: the app is all there is to report.
+    ///
+    /// Off the main thread by construction (two to three process spawns): callers run it detached.
+    nonisolated static func terminalHostAppPID(forClient pid: Int32) -> pid_t? {
+        let table = processTable()
+        guard table[pid] != nil else { return nil }
+        var chain = ancestors(of: pid, in: table)
+        let isTmuxPane = chain.contains { ($0.comm as NSString).lastPathComponent == "tmux" }
+        if isTmuxPane {
+            guard let paneTTY = table[pid]?.tty, !paneTTY.isEmpty, paneTTY != "??",
+                  let pane = tmuxPaneState(forPaneTTY: paneTTY), pane.isShowing,
+                  let clientTTY = pane.clientTTY,
+                  let holder = table.values.first(where: { $0.tty == clientTTY }) else { return nil }
+            chain = ancestors(of: holder.pid, in: table)
+        }
+        // The first ancestor that is a bundled application's main executable is the terminal. No
+        // LaunchServices lookup is needed — and none is wanted: matching the bundle layout keeps this
+        // file free of AppKit, and `login`/the shell/tmux (`/usr/bin/login`, `/bin/bash`,
+        // `/opt/homebrew/bin/tmux`) cannot be mistaken for one.
+        return chain.first { $0.comm.contains(".app/Contents/MacOS/") }?.pid
+    }
+
+    private nonisolated static func processTable() -> [pid_t: ProcessEntry] {
+        var table: [pid_t: ProcessEntry] = [:]
+        for line in runShell("ps -Ao pid=,ppid=,tty=,comm=").split(separator: "\n") {
+            // `comm` can hold spaces (`Google Chrome Helper`), so it takes the rest of the line.
+            let fields = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+            guard fields.count == 4, let pid = pid_t(fields[0]), let ppid = pid_t(fields[1]) else { continue }
+            // `ps` pads its columns, and the remainder taken past `maxSplits` keeps that padding —
+            // without the trim, `comm` reads "      tmux" and matches no bundle path.
+            table[pid] = ProcessEntry(pid: pid, ppid: ppid,
+                                      tty: fields[2].trimmingCharacters(in: .whitespaces),
+                                      comm: fields[3].trimmingCharacters(in: .whitespaces))
+        }
+        return table
+    }
+
+    /// `pid` and its parents, nearest first. Capped, because a ppid cycle would spin here forever.
+    private nonisolated static func ancestors(of pid: pid_t, in table: [pid_t: ProcessEntry]) -> [ProcessEntry] {
+        var chain: [ProcessEntry] = []
+        var current = pid
+        while let entry = table[current], chain.count < 32 {
+            chain.append(entry)
+            current = entry.ppid
+        }
+        return chain
+    }
+
+    /// What tmux says about one pane: whether its session is currently *showing* it, and the tty of
+    /// a client attached to that session (the terminal surface's own tty).
+    private struct TmuxPaneState {
+        let isShowing: Bool
+        let clientTTY: String?
+    }
+
+    /// Ask tmux about the pane on `pane` (`ttys003`).
+    ///
+    /// `isShowing` is tmux's own view state: the pane is the active one in its window
+    /// (`pane_active`), that window is the active one in its session (`window_active`), and at least
+    /// one client is attached (`session_attached`). Any of the three failing means the session is
+    /// *not* on screen, whatever the terminal app is doing — which is the whole point of asking.
+    ///
+    /// The client's tty comes back too because it is the only route to the app: the pane's own shell
+    /// hangs off the daemonized tmux server, and the terminal is a parent of the **client**.
+    private nonisolated static func tmuxPaneState(forPaneTTY pane: String) -> TmuxPaneState? {
+        // `tmux` lives in Homebrew paths that a GUI app's PATH doesn't include. One `sh` for both
+        // queries: this already runs behind a `ps` table, on the alert path.
+        let out = runShell("""
+        export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+        ROW=$(tmux list-panes -a -F '#{pane_tty} #{session_name} #{pane_active} #{window_active} #{session_attached}' 2>/dev/null | awk -v p="/dev/\(pane)" '$1==p{print $2, $3, $4, $5; exit}')
+        [ -z "$ROW" ] && exit 0
+        set -- $ROW
+        CLIENT=$(tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null | awk -v s="$1" '$2==s{print $1; exit}')
+        echo "$2 $3 $4 $CLIENT"
+        """).trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard out.count == 4 else { return nil }
+        let attached = Int(out[2]) ?? 0
+        let isShowing = out[0] == "1" && out[1] == "1" && attached > 0
+        // `/dev/ttys000` → `ttys000`, the form `ps` prints.
+        let clientTTY = out[3].isEmpty ? nil : (out[3] as NSString).lastPathComponent
+        return TmuxPaneState(isShowing: isShowing, clientTTY: clientTTY)
+    }
+
     private func sendIdleNotification(projectDir: String) {
         let name = displayName(for: projectDir)
         let content = UNMutableNotificationContent()
