@@ -777,6 +777,13 @@ final class IslandPanel {
     private let animationDuration: TimeInterval = 0.3
     private let rowInset: CGFloat = 8
     private let bottomPadding: CGFloat = 8
+    /// Extra bottom air the card pays **only when it has no action row**. The hover card's last session
+    /// row otherwise sits `bottomPadding` (8) above a bottom edge rounded up to 18, while the top edge
+    /// pays two steps (the cutout — or `rowInset` — plus `islandExpandedTopPadding`), so the card read
+    /// heavy at the top and pinched at the bottom. The alert's card needs none of it: the `Hide` row
+    /// already stands between the last session row and the edge, which is why this is a *conditional*
+    /// step and not a bigger `bottomPadding`.
+    private let bottomPaddingWithoutActionRow: CGFloat = 8
     private let expandedCornerRadius: CGFloat = 18
     /// Fake-notch capsule width for a display with no cutout. The rule is `islandStandInCapsuleWidth`
     /// — a share of the screen's width, floored and capped so it stays a pill, and floored again by
@@ -941,7 +948,7 @@ final class IslandPanel {
         let size: NSSize
         if expanded {
             let height = card?.contentHeight
-                ?? (contentTop(for: metrics) + islandRowOneLineHeight + bottomPadding)
+                ?? (contentTop(for: metrics) + islandRowOneLineHeight + cardBottomPadding)
             size = NSSize(width: expandedCardWidth(collapsedWidth: collapsed.width, metrics: metrics), height: height)
         } else {
             size = collapsed
@@ -1115,7 +1122,7 @@ final class IslandPanel {
             screenFrame: metrics.screen.frame,
             visibleFrame: metrics.screen.visibleFrame,
             contentTop: contentTop(for: metrics),
-            bottomPadding: bottomPadding,
+            bottomPadding: cardBottomPadding,
             summaryRowHeight: summaryRowHeight,
             actionRowHeight: actionRowHeight,
             tallestRowHeight: tallestRowHeight,
@@ -1128,6 +1135,15 @@ final class IslandPanel {
     /// is a row *of this card*, so it takes the card's rhythm rather than a height of its own, and the
     /// panel's copy and the card's (`IslandCardView.actionRowHeight`) come from that one number.
     private var actionRowHeight: CGFloat { alertArmed ? summaryRowHeight : 0 }
+
+    /// The bottom air the card pays *right now*: its one unit, plus `bottomPaddingWithoutActionRow` when
+    /// there is no `Hide` row under the last session row. One expression for the three readers — the
+    /// height budget, the fallback frame, and `card.bottomPadding` (pushed in `applyAppearance` /
+    /// `resizeOpenCard`), which is what `IslandCardView.contentHeight` moves the window by — so a change
+    /// here cannot leave the frame and the layout disagreeing about the card's height.
+    private var cardBottomPadding: CGFloat {
+        bottomPadding + (actionRowHeight > 0 ? 0 : bottomPaddingWithoutActionRow)
+    }
 
     /// Add or remove the alert's action row, and report whether the card's chrome changed.
     ///
@@ -1168,6 +1184,9 @@ final class IslandPanel {
         guard visible, expandedState, let card else { return }
         let metrics = currentMetrics()
         card.contentTop = contentTop(for: metrics)
+        // The action row coming or going moves the bottom air with it (`cardBottomPadding`), so the
+        // shrink below is the row's 24 *and* this step, never one of them.
+        card.bottomPadding = cardBottomPadding
         card.needsLayout = true
         animateFrame(to: frame(expanded: true, metrics: metrics))
     }
@@ -1369,6 +1388,9 @@ final class IslandPanel {
         // Flush against the top edge: the card's own `draw` squares the top corners on every
         // display — see there for why the shape does not vary with the screen.
         card.contentTop = expanded ? contentTop(for: metrics) : rowInset
+        // Same rule as `contentTop`, one edge down: the extra step is the *expanded* card's, and it only
+        // applies while the card has no action row to sit above (`cardBottomPadding`).
+        card.bottomPadding = expanded ? cardBottomPadding : bottomPadding
         card.rowViews = rowViews
         card.needsLayout = true
 
