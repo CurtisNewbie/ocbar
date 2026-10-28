@@ -2852,6 +2852,14 @@ private final class IslandActivityView: NSView, IslandFlankElement {
     private var angle = IslandRing.restingAngle
     private var workspaceObservers: [NSObjectProtocol] = []
 
+    /// How far the **pill's** mark sits below the geometric centre, in points. The badges' ink and the
+    /// ring's box are both centred, but the ring is a hollow stroke and the digits beside it are solid,
+    /// so on the collapsed pill — and only there, on the eye's measure — the mark reads a couple of
+    /// points high. A card row's mark is centred in a fixed glyph column against the row's other discs
+    /// and takes no nudge (`markDiameter` is what tells the two hosts apart: set only by a row).
+    private var pillMarkDrop: CGFloat { markDiameter == nil ? Self.pillMarkDropPoints : 0 }
+    private static let pillMarkDropPoints: CGFloat = 0.5
+
     /// Drawn in the standard, unflipped space, like the menubar's mark, so the same
     /// sign of rotation turns both clockwise.
     override var isFlipped: Bool { false }
@@ -2953,7 +2961,7 @@ private final class IslandActivityView: NSView, IslandFlankElement {
         // The same path the image renderer strokes into its canvas — one construction, so the mark
         // in the menubar and the mark in a row cannot be two different drawings.
         let ring = IslandRing.arcPath(diameter: diameter, angle: angle,
-                                      center: NSPoint(x: bounds.midX, y: bounds.midY))
+                                      center: NSPoint(x: bounds.midX, y: bounds.midY - pillMarkDrop))
         tint.setStroke()
         ring.stroke()
     }
