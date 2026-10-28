@@ -1307,7 +1307,7 @@ final class IslandPanel {
         cancelPending()
         expandedState = false
         applyAppearance(expanded: false, metrics: metrics, animated: false)
-        panel.setFrame(frame(expanded: false, metrics: metrics), display: false)
+        setFrame(frame(expanded: false, metrics: metrics), display: false, animated: false)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         visible = true
@@ -1364,20 +1364,12 @@ final class IslandPanel {
         // Before the guard: the card's rows follow `expandedState` whether or not this panel is up,
         // and a row's mark must stop the moment the card starts closing rather than at the next tick.
         updateRowOnScreen()
-        guard visible, let panel else { return }
+        guard visible else { return }
         let metrics = currentMetrics()
         let time = duration ?? animationDuration
         applyAppearance(expanded: value, metrics: metrics, animated: animated, duration: time)
         let target = frame(expanded: value, metrics: metrics)
-        if animated {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = time
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-                panel.animator().setFrame(target, display: true)
-            }
-        } else {
-            panel.setFrame(target, display: true)
-        }
+        setFrame(target, display: true, animated: animated, duration: time)
     }
 
     /// The window is sized to its visible bounds, so the same frame change that
@@ -1420,13 +1412,37 @@ final class IslandPanel {
         }
     }
 
-    private func animateFrame(to target: NSRect) {
-        guard let panel, panel.frame != target else { return }
+    /// Move the panel's window to `target` — **always through the animator proxy, including the moves
+    /// that are not meant to take time** (`animated: false` is a zero-duration animation, never a direct
+    /// `setFrame`).
+    ///
+    /// That is not a stylistic choice. A direct `setFrame` does **not** cancel a frame animation already
+    /// in flight: the animation's next step writes its old target back over the new frame, so the window
+    /// finishes where the animation was always going. That is a real bug this surface shipped — a fold
+    /// landing inside the open's 0.3s (`collapse()` from a row click, the `Hide` button, or the menubar
+    /// opening) switched the surface back to the collapsed pill while the window kept growing to the
+    /// **expanded** frame, leaving a full-size black card with nothing on it but the ring and the running
+    /// count floating in the middle, and no row anywhere. Starting an animation — of any length — is what
+    /// cancels the previous one.
+    ///
+    /// The instant path deliberately has no "already there" guard: while an animation to *another* target
+    /// is running, the frame may sit exactly on `target` for a moment, and returning early there would be
+    /// the one case that leaves the stale animation alive.
+    private func setFrame(_ target: NSRect, display: Bool, animated: Bool, duration: TimeInterval? = nil) {
+        guard let panel else { return }
+        if animated, panel.frame == target { return }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.25
+            ctx.duration = animated ? (duration ?? animationDuration) : 0
             ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
-            panel.animator().setFrame(target, display: true)
+            panel.animator().setFrame(target, display: display)
         }
+    }
+
+    /// Resize an open card (the fold moved, or the alert's action row came or went). Animated, because the
+    /// card is on screen and a height change is information the user is reading; the animator is what
+    /// makes it supersede any open/fold still in flight (see `setFrame`).
+    private func animateFrame(to target: NSRect) {
+        setFrame(target, display: true, animated: true, duration: 0.25)
     }
 
     // MARK: - Hover
