@@ -190,6 +190,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(bubbleColorMenu())
         menu.addItem(alertSoundMenu())
         menu.addItem(islandMenu())
+        menu.addItem(islandHoverDelayMenu())
         menu.addItem(showSessionTimeMenu())
         menu.addItem(showSessionTitlesMenu())
         menu.addItem(contextUsageMenu())
@@ -794,6 +795,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func islandToggled(_ sender: NSMenuItem) {
         UserDefaults.standard.set(!islandEnabled, forKey: islandEnabledKey)
         render(currentState, forceMenuRefresh: true)
+    }
+
+    /// The island's own timing, sitting next to the island's own toggle: how long the pointer has to
+    /// rest on the pill before the card opens. The fold is not this menu's — it is fixed at 0.2s inside
+    /// `IslandPanel` (`hoverCloseDelay`), since leaving an open card is a decision the pointer has
+    /// already made and should not have to wait out a dwell.
+    private func islandHoverDelayMenu() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        let current = Int((islandHoverDelay() * 1000).rounded())
+        for milliseconds in islandHoverDelayOptions {
+            let item = NSMenuItem(title: islandHoverDelayLabel(milliseconds),
+                                  action: #selector(islandHoverDelaySelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = milliseconds
+            item.state = milliseconds == current ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Island hover delay", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    @objc private func islandHoverDelaySelected(_ sender: NSMenuItem) {
+        setIslandHoverDelay(milliseconds: sender.tag)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    /// Milliseconds to the dropdown's label: `100` → "0.1s", `350` → "0.35s", `1000` → "1s".
+    private func islandHoverDelayLabel(_ milliseconds: Int) -> String {
+        String(format: "%gs", Double(milliseconds) / 1000)
     }
 
     /// Rows handed to the island: the same status and age the dropdown uses, plus

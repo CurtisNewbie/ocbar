@@ -450,6 +450,40 @@ enum IslandAlertKind {
     }
 }
 
+// MARK: - Hover dwell preference
+
+/// The hover dwell is the one of the island's timings the user gets to set, because it is the open they
+/// feel: the pause between pointing at the pill and the card arriving. **Only the open** — the fold has
+/// its own fixed `hoverCloseDelay` (0.2s, in `IslandPanel`), since a pointer that has left an open card
+/// has already decided and should not wait out a dwell it did not choose. It shipped as a constant
+/// 0.35; the default is now 0.1 — as prompt as the 0.15s poll can deliver — and the dropdown offers a
+/// spread up to 1s for anyone who wants the card to wait (`ocbar.islandHoverDelay`).
+///
+/// Milliseconds, not seconds, because the menu carries the choice in an `NSMenuItem.tag`, which is an
+/// `Int`. The option list is the payload and the reader validates against it, so a stale or
+/// hand-edited value can only fall back to the default and never to "the island never opens".
+let islandHoverDelayOptions = [100, 200, 350, 500, 800, 1000]
+let defaultIslandHoverDelay = 100
+private let islandHoverDelayKey = "ocbar.islandHoverDelay"
+
+/// Read at schedule time rather than cached at launch, so a pick in the dropdown applies to the next
+/// hover instead of the next launch. Below the 0.15 poll the poll decides: at the 0.1 default the card
+/// opens on the following tick, which is the floor — and why the fastest option is not zero.
+func islandHoverDelay() -> TimeInterval {
+    guard let ms = UserDefaults.standard.object(forKey: islandHoverDelayKey) as? Int,
+          islandHoverDelayOptions.contains(ms) else {
+        return TimeInterval(defaultIslandHoverDelay) / 1000
+    }
+    return TimeInterval(ms) / 1000
+}
+
+/// Write side of the preference, validated here so the dropdown and a hand-edited `defaults write`
+/// pass through the same gate: an illegal value is dropped, not stored.
+func setIslandHoverDelay(milliseconds: Int) {
+    guard islandHoverDelayOptions.contains(milliseconds) else { return }
+    UserDefaults.standard.set(milliseconds, forKey: islandHoverDelayKey)
+}
+
 /// CodeIsland-style "Dynamic Island" surface: a borderless, non-activating
 /// panel pinned to the very top edge of **one** screen. Collapsed it hides
 /// inside that screen's notch — or, on a display with no cutout, becomes a
@@ -726,7 +760,16 @@ final class IslandPanel {
     /// frame, which is worse than an alert held for a moment too long.
     private let alertMinimumSeconds: TimeInterval = 1
 
-    private let hoverDelay: TimeInterval = 0.35
+    /// The dwell before the card opens: the one island timing the user sets
+    /// (`ocbar.islandHoverDelay`, see `islandHoverDelay()`), read here at schedule time so a change in
+    /// the dropdown lands on the next hover.
+    private var hoverDelay: TimeInterval { islandHoverDelay() }
+    /// The dwell before the card folds, and **fixed on purpose** — the dropdown moves the open, never
+    /// this. The two are not symmetric events: the open has to earn itself against a pointer that may
+    /// only be crossing the pill, while a pointer that has *left* an open card has already decided, so
+    /// the fold should answer it. 0.2s is just clear of the 0.15s poll, which keeps a pointer skimming
+    /// the card's edge from tearing it down mid-gesture.
+    private let hoverCloseDelay: TimeInterval = 0.2
     private let hoverInterval: TimeInterval = 0.15
     /// Downward slack on the collapsed hover rect so the pointer can travel
     /// from the pill into the growing card without a collapse being scheduled.
@@ -1413,7 +1456,7 @@ final class IslandPanel {
     }
 
     /// The delays are one-shot. The hover poll re-runs every 0.15s, so a naive
-    /// "cancel and reschedule" would push the 0.35s deadline back on every tick
+    /// "cancel and reschedule" would push the deadline back on every tick
     /// and the island would never actually expand or collapse.
     private func scheduleExpand() {
         collapseWork?.cancel()
@@ -1436,7 +1479,7 @@ final class IslandPanel {
         // **An alert's card is not the hover poll's to fold.** That poll runs every
         // 0.15s and the pointer is usually *outside* the island when an alert fires
         // — that is what an unprompted expansion is — so without this guard the
-        // alert would be folded ~0.35s after it opened and nobody would ever read
+        // alert would be folded one `hoverCloseDelay` after it opened and nobody would ever read
         // it. While one is armed, the alert's own timer owns the fold and hands the
         // card back here when it ends (`endAlert`). Expansion is deliberately not
         // guarded *by the alert*: unless a dismissal has latched the hover open off
@@ -1448,7 +1491,7 @@ final class IslandPanel {
             self.setExpanded(false, animated: true)
         }
         collapseWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + hoverDelay, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + hoverCloseDelay, execute: work)
     }
 
     private func cancelPending() {
