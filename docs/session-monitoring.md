@@ -29,9 +29,19 @@ Sessions are never collapsed per directory: every bound root is emitted as its o
 
 ## The ocbar-bridge plugin
 
-- Source `plugin/ocbar-bridge/tui.js`; `build.sh` installs it to `~/.config/opencode/plugins/ocbar-bridge/tui.js`. It runs inside the TUI client process, so `process.pid` there is the terminal client pid. Every 200ms it reads the live route (`ctx.ui.router.current()`) and atomically writes `{version, pid, sessionID, isRoot, directory, updatedAt}` to `~/.local/state/ocbar/bindings/<pid>.json` (temp file + rename, so ocbar never reads a half-written file); on teardown it deletes that file.
+- Source `plugin/ocbar-bridge/tui.js`; `build.sh` installs it to `~/.config/opencode/plugins/ocbar-bridge/tui.js`. It runs inside the TUI client process, so `process.pid` there is the terminal client pid. Every 200ms it reads the live route (`ctx.ui.router.current()`) and atomically writes `{version, pid, sessionID, isRoot, directory, tmuxPane, tmuxSocket, updatedAt}` to `~/.local/state/ocbar/bindings/<pid>.json` (temp file + rename, so ocbar never reads a half-written file); on teardown it deletes that file. `tmuxPane`/`tmuxSocket` are the plugin's own `$TMUX_PANE` and `$TMUX`'s socket field — null outside tmux — and exist so a row click knows the pane without asking tmux (see "Jumping to a session" below).
 - ocbar's read priority per live client pid: a fresh binding file (<15s old) wins, and `sessionID: null` in it means the client is in no session (e.g. parked on the home page after `/clear`) and ocbar does **not** fall back to argv; only a pid with no fresh binding file falls back to argv parsing. A file is likewise ignored when its pid or `updatedAt` is missing, its `updatedAt` is stale, or its `isRoot` is explicitly `false`.
 - Zero dependencies (only `node:fs`/`node:os`); `setup()` uses `setInterval` + a returned cleanup fn, since it runs outside a Solid owner.
+
+## Jumping to a session
+
+A row click (island row, menubar row, bubble) ends in `SessionMonitor.focusSession(pid:)`: `open -a Ghostty` and the tmux pane switch run **concurrently**, so the click costs the longer of the two rather than their sum.
+
+- **Where the pane comes from, in order** (`showPane(ofClient:known:)`): (1) the pid→pane map `scan()` keeps from the bindings above; (2) otherwise the client's own environment, `$TMUX_PANE` + `$TMUX`, read with one `KERN_PROCARGS2` sysctl — this is the tier that covers a client whose binding was written by a plugin older than those fields, i.e. every session running across an upgrade until it restarts; (3) otherwise the client's tty (`kinfo_proc.kp_eproc.e_tdev`, then one `tmux list-panes`). A wrong pane id from (1)/(2) — pane closed, server restarted under a binding — is caught by `switch-client`'s exit status, which falls through the same ladder.
+- **`switch-client -t %pane`, without `-c <client>`**: one attached client *is* the current one, and with several tmux picks the most recently active; naming one costs another spawn (`list-clients`) to say what tmux already knows.
+- **The AppleScript hop is gone, and must not come back.** `osascript … focus (first terminal whose tty is …)` cannot work — Ghostty 1.3 dropped the `tty` property — so it spent ~200ms behind an Apple Events consent check earning a `-2753` and then fell through to `open -a Ghostty` anyway.
+- **`open -a Ghostty`, not `NSRunningApplication.activate`**: activating by pid is refused for an accessory app that is not itself frontmost (the state a click on the island comes from), and it fails silently. `open` goes through launchservicesd, in ~120ms.
+- Measured inside the bundle, per click: **~590ms** for the original shell pipeline (`sh`+`ps`+`tr`+`awk`, `list-clients`, the osascript), **~220–250ms** after it became syscalls plus `list-panes`+`switch-client`, **~130ms** now. The floor is one `tmux` spawn (~110–130ms: dyld + a server round trip) with `open`'s 120ms hidden under it; after that it is Ghostty's own raise, which ocbar cannot influence.
 
 ## Shell helpers that pass an explicit id
 

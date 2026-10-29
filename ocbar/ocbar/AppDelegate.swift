@@ -1200,7 +1200,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// a background tmux window, since every pane shares the app. What is still not knowable is the
     /// **tab across sessions** — a terminal with two tabs attached to different tmux sessions cannot
     /// say which is in front without Accessibility (never requested) or a per-terminal AppleScript
-    /// (Ghostty 1.3 dropped the `tty` property this file's `focusCommand` was written against) — hence
+    /// (Ghostty 1.3 dropped the `tty` property the old focus script was written against) — hence
     /// `ocbar.alertFocusedFold` defaults to off.
     ///
     /// The pid is resolved off the main thread (a `ps` table, and one `tmux` script for a pane) and

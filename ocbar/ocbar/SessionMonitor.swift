@@ -14,6 +14,10 @@ class SessionMonitor {
     private var previousStatus: [String: SessionStatus] = [:]
     private var previousDir: [String: String] = [:]
     private var sessionIDToPID: [String: Int32] = [:]
+    /// Client pid -> the tmux pane that client's terminal is showing, as the client's own binding
+    /// published it. Only for the click path (`focusSession`), refreshed with the bindings every
+    /// `scanTimer` tick; a pid missing here just takes the slower tty-based resolution.
+    private var focusByPID: [Int32: TmuxPaneRef] = [:]
     /// Per-model usable context ceiling, keyed by "providerID/id". A missing key
     /// means the model's limit info is unknown (=> nil display limit).
     private var modelUsable: [String: Int] = [:]
@@ -55,6 +59,9 @@ class SessionMonitor {
         guard let endpoint = readService(), await isReady(endpoint) else {
             service = nil
             sessionIDToPID = [:]
+            // No service, no live clients: the pane hints go too, so a click never acts on a pid that
+            // has since been reused.
+            focusByPID = [:]
             await poll()
             return
         }
@@ -63,7 +70,8 @@ class SessionMonitor {
         let clients = await Task.detached {
             SessionMonitor.attachedClients(servicePID: pid)
         }.value
-        sessionIDToPID = clients
+        sessionIDToPID = clients.sessionIDToPID
+        focusByPID = clients.focusByPID
         await poll()
     }
 
@@ -416,8 +424,11 @@ class SessionMonitor {
     /// the client's *live* route (`/clear`, `/new`, session tabs, … all change
     /// it without touching argv). The launch-time argv id (`--session <id>` /
     /// `-s <id>`) is only a fallback for clients with no fresh binding file.
-    private nonisolated static func attachedClients(servicePID: Int32) -> [String: Int32] {
-        var sessionIDToPID: [String: Int32] = [:]
+    ///
+    /// The same pass collects the **focus target** (client pid -> tmux pane) those bindings carry,
+    /// so a click does not have to rediscover it; see `publishedBindings()` and `focusSession`.
+    private nonisolated static func attachedClients(servicePID: Int32) -> ClientScan {
+        var scan = ClientScan()
 
         var argvByPID: [Int32: String] = [:]
         let argsOutput = runShell("ps -Ao pid=,args= -ww")
@@ -443,22 +454,30 @@ class SessionMonitor {
         for pid in clientPIDs.sorted() {
             // A fresh published binding is authoritative for this client.
             if let binding = published[pid] {
-                if let sessionID = binding, sessionIDToPID[sessionID] == nil {
-                    sessionIDToPID[sessionID] = pid
+                if let sessionID = binding.sessionID, scan.sessionIDToPID[sessionID] == nil {
+                    scan.sessionIDToPID[sessionID] = pid
                 }
                 // A `nil` binding means the client has no current session; do
                 // not fall back to the stale argv id in that case.
+                if let pane = binding.pane { scan.focusByPID[pid] = pane }
                 continue
             }
 
             // No fresh binding file: fall back to the launch-time argv id.
             if let argv = argvByPID[pid],
                let sessionID = sessionID(fromArgv: argv),
-               sessionIDToPID[sessionID] == nil {
-                sessionIDToPID[sessionID] = pid
+               scan.sessionIDToPID[sessionID] == nil {
+                scan.sessionIDToPID[sessionID] = pid
             }
         }
-        return sessionIDToPID
+        return scan
+    }
+
+    /// One pass over the running clients: the session each one drives, and the tmux pane each one is
+    /// in (where its binding reported one).
+    private struct ClientScan {
+        var sessionIDToPID: [String: Int32] = [:]
+        var focusByPID: [Int32: TmuxPaneRef] = [:]
     }
 
     /// Read the per-client binding files published by the Web/TUI plugin under
@@ -468,9 +487,15 @@ class SessionMonitor {
     ///
     /// Missing/corrupt files are skipped silently. A file is ignored when its
     /// pid/`updatedAt` is missing, its `updatedAt` is stale (> 15s), or its
-    /// `isRoot` is explicitly `false`. Returns `[pid: sessionID?]`.
-    private nonisolated static func publishedBindings() -> [Int32: String?] {
-        var bindings: [Int32: String?] = [:]
+    /// `isRoot` is explicitly `false`. Returns `[pid: PublishedBinding]`.
+    ///
+    /// The same file carries the tmux pane the client runs in (`tmuxPane` / `tmuxSocket`, from the
+    /// plugin's own `TMUX_PANE` / `TMUX`), which is what makes a row click one `tmux switch-client`
+    /// instead of a `ps` + `list-panes` hunt — see `focusSession`. It can be trusted *because* it is
+    /// published by the process in the pane and refreshed every 200ms: the pane id, not a guess from
+    /// a tty, and never older than the same 15s the session id is allowed.
+    private nonisolated static func publishedBindings() -> [Int32: PublishedBinding] {
+        var bindings: [Int32: PublishedBinding] = [:]
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/state/ocbar/bindings")
         guard let files = try? FileManager.default.contentsOfDirectory(
@@ -499,9 +524,30 @@ class SessionMonitor {
 
             if let isRoot = json["isRoot"] as? Bool, isRoot == false { continue }
 
-            bindings[pid] = json["sessionID"] as? String
+            bindings[pid] = PublishedBinding(
+                sessionID: json["sessionID"] as? String,
+                pane: (json["tmuxPane"] as? String).map {
+                    TmuxPaneRef(pane: $0, socket: json["tmuxSocket"] as? String)
+                })
         }
         return bindings
+    }
+
+    /// A live binding's two answers: the session the client is driving, and — when the plugin saw a
+    /// `TMUX_PANE` — the pane that session's terminal is showing. `pane` is nil both outside tmux and
+    /// for a binding written by a plugin older than this field; either way the click falls back to
+    /// resolving the pane from the client's tty.
+    private struct PublishedBinding {
+        let sessionID: String?
+        let pane: TmuxPaneRef?
+    }
+
+    /// The pane a client is in, as its own process reported it. `socket` is the tmux server's socket
+    /// path (`$TMUX`'s first field), so the switch hits the server the client is actually attached to
+    /// even when the app's own `TMPDIR` would have pointed tmux somewhere else.
+    private struct TmuxPaneRef {
+        let pane: String
+        let socket: String?
     }
 
     /// Extract the session id passed on the command line, accepting
@@ -542,36 +588,181 @@ class SessionMonitor {
     }
 
     /// Focus the tmux pane hosting the OpenCode client `pid` in Ghostty.
-    /// Runs off the main thread since it spawns processes + `osascript`.
+    ///
+    /// This is the one path a mouse click waits on, so nothing here may wait on a process it does
+    /// not need — and the halves that *are* processes run at once:
+    ///
+    /// - **The pane is known before the click.** The ocbar-bridge plugin runs inside the pane, so it
+    ///   publishes that pane's id (`tmuxPane`, from its own `TMUX_PANE`) into the same binding file
+    ///   that carries the session id, and `scan()` keeps the pid→pane map refreshed. A click
+    ///   therefore spends **one** spawn (`switch-client`) instead of discovering the pane first.
+    ///   When the map has no entry for the pid — not in tmux, or a binding from a plugin older than
+    ///   the field — the client's *environment* answers with the same pane and still one spawn
+    ///   (`paneFromEnvironment`); only when neither says anything does the tty route run.
+    /// - **The client's tty is a syscall.** `ps -o tty= | tr -d ' '` (a `sh`, a `ps` and a `tr`)
+    ///   became one `sysctl(KERN_PROC_PID)` reading `kinfo_proc.kp_eproc.e_tdev`: the same
+    ///   `ttys004`, in microseconds.
+    /// - **The AppleScript hop is gone.** `osascript … focus (first terminal whose tty is …)` could
+    ///   not succeed: Ghostty 1.3 dropped the `tty` property, so every click spent ~200ms — behind an
+    ///   Apple Events consent check — earning a `-2753`, and then fell through to `open -a Ghostty`
+    ///   anyway. Terminal-level *tab* selection is still not something ocbar can do (it is the
+    ///   residual approximation `terminalHostAppPID(forClient:)` documents), and paying for it on
+    ///   every click was most of the click's latency.
+    /// - **The raise and the pane switch overlap.** They are independent: `open` brings the window
+    ///   forward, `switch-client` decides which pane that window shows, and tmux repaints in the
+    ///   background. Serially they were ~250ms; overlapped, the click costs the longer of the two.
+    /// - **`open -a`, not `NSRunningApplication.activate`.** Activating Ghostty by pid was measured
+    ///   and is *refused* for an accessory app that is not itself frontmost — exactly the state a
+    ///   click on the island comes from — and it fails silently. `open` goes through launchservicesd,
+    ///   which can raise the app, in ~120ms.
+    ///
+    /// Measured inside a bundle, per click: ~590ms with the old shell pipeline, ~220–250ms once the
+    /// pipeline became syscalls plus one `list-panes` and one `switch-client` (each spawn ~110ms:
+    /// dyld + a server round trip, with `open`'s 120ms hidden under them), and ~130ms now that the
+    /// pane comes from the binding and only the switch is left. What remains is that one spawn plus
+    /// Ghostty's own raise.
     func focusSession(pid: Int32?) {
-        let pidArg = pid.map(String.init) ?? ""
-        Task.detached {
-            _ = SessionMonitor.runShell(SessionMonitor.focusCommand(pid: pidArg))
+        let known = pid.flatMap { focusByPID[$0] }
+        Task.detached(priority: .userInitiated) {
+            async let raised: Void = SessionMonitor.activateTerminal()
+            if let pid { SessionMonitor.showPane(ofClient: pid, known: known) }
+            await raised
         }
     }
 
-    private nonisolated static func focusCommand(pid: String) -> String {
-        // `tmux` lives in Homebrew paths that a GUI app's PATH doesn't include.
-        // The `osascript` call triggers a one-time macOS Automation permission
-        // prompt ("ocbar wants to control Ghostty"); denying it falls back to
-        // plain `open -a Ghostty`.
-        """
-        export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-        PID='\(pid)'
-        if [ -z "$PID" ] || ! command -v tmux >/dev/null 2>&1; then open -a Ghostty; exit 0; fi
-        PT=$(ps -o tty= -p "$PID" 2>/dev/null | tr -d ' ')
-        if [ -z "$PT" ]; then open -a Ghostty; exit 0; fi
-        ROW=$(tmux list-panes -a -F '#{pane_tty} #{pane_id} #{session_name}' 2>/dev/null | awk -v t="/dev/$PT" '$1==t{print $2" "$3; exit}')
-        if [ -z "$ROW" ]; then open -a Ghostty; exit 0; fi
-        PANE_ID=${ROW%% *}; SESS=${ROW#* }
-        CLIENT=$(tmux list-clients -F '#{client_tty} #{client_session}' 2>/dev/null | awk -v s="$SESS" '$2==s{print $1; exit}')
-        if [ -n "$CLIENT" ]; then tmux switch-client -c "$CLIENT" -t "$PANE_ID" 2>/dev/null || true; fi
-        if [ -n "$CLIENT" ]; then
-          osascript -e "tell application \\"Ghostty\\" to focus (first terminal whose tty is \\"$CLIENT\\")" 2>/dev/null || open -a Ghostty
-        else
-          open -a Ghostty
-        fi
-        """
+    /// `open -a Ghostty`, run to exit: the caller's task is already detached and concurrent, so the
+    /// wait costs the click nothing and the child is reaped like every other spawn in this file.
+    private nonisolated static func activateTerminal() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-a", "Ghostty"]
+        try? p.run()
+        p.waitUntilExit()
+    }
+
+    /// Make the tmux pane that hosts `pid` the one its client is showing. A silent no-op when the
+    /// client is not in tmux — that case is answered by the app raise alone.
+    ///
+    /// Three answers, cheapest and most trustworthy first, each falling through on failure:
+    ///
+    /// 1. **The client's binding** (`known`): the pane the plugin running *inside* that pane
+    ///    published, already parsed with the session id on every scan.
+    /// 2. **The client's environment**: `TMUX_PANE` + `$TMUX`'s socket read straight out of the
+    ///    process. No spawn, and the answer for a client whose binding was written by a plugin older
+    ///    than those fields — which is every client running across an ocbar upgrade until it restarts.
+    /// 3. **The client's tty**: what is left when neither says anything, and the only reason
+    ///    `controllingTTY` and `paneID` still exist.
+    ///
+    /// A wrong pane id — a pane that has since been closed, a server restarted under a binding — is
+    /// caught by `switch-client` itself: its exit status is the fall-through.
+    private nonisolated static func showPane(ofClient pid: pid_t, known: TmuxPaneRef?) {
+        // No `-c <client>`: with one attached client that is the one, and with several tmux picks
+        // the most recently active — the client the user was last in. Naming one costs another
+        // spawn (`list-clients`) to tell tmux what it already knows.
+        if let known, tmux(["switch-client", "-t", known.pane], socket: known.socket).ok { return }
+        if let live = paneFromEnvironment(of: pid),
+           tmux(["switch-client", "-t", live.pane], socket: live.socket).ok { return }
+        guard let tty = controllingTTY(of: pid), let pane = paneID(forTTY: tty) else { return }
+        _ = tmux(["switch-client", "-t", pane])
+    }
+
+    /// The pane `pid` is in, from its own environment: `$TMUX_PANE`, and the server's socket as
+    /// `$TMUX`'s first comma-separated field. Nil outside tmux.
+    private nonisolated static func paneFromEnvironment(of pid: pid_t) -> TmuxPaneRef? {
+        let env = environment(of: pid)
+        guard let pane = env["TMUX_PANE"], !pane.isEmpty else { return nil }
+        let socket = env["TMUX"].flatMap { $0.split(separator: ",").first.map(String.init) }
+        return TmuxPaneRef(pane: pane, socket: (socket?.isEmpty ?? true) ? nil : socket)
+    }
+
+    /// `pid`'s environment block, read from the kernel: same-uid processes only, which is every
+    /// client ocbar shows, and no process spawn.
+    ///
+    /// `KERN_PROCARGS2` hands back one buffer: an `Int32` argc, the exec path, NUL padding, `argc`
+    /// argv strings, then the `KEY=VALUE` block. Anything unreadable (a restricted process, a
+    /// truncated read) is an empty dictionary — the caller then falls through to the tty route.
+    private nonisolated static func environment(of pid: pid_t) -> [String: String] {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0,
+              size > MemoryLayout<Int32>.size else { return [:] }
+        var buf = [UInt8](repeating: 0, count: size)
+        guard buf.withUnsafeMutableBytes({ sysctl(&mib, 3, $0.baseAddress, &size, nil, 0) }) == 0 else { return [:] }
+        let end = min(size, buf.count)
+
+        var argc: Int32 = 0
+        memcpy(&argc, buf, MemoryLayout<Int32>.size)
+        var i = MemoryLayout<Int32>.size
+        while i < end && buf[i] != 0 { i += 1 }   // exec path
+        while i < end && buf[i] == 0 { i += 1 }   // padding
+        var arg = 0
+        while arg < Int(argc) && i < end {         // argv
+            while i < end && buf[i] != 0 { i += 1 }
+            i += 1
+            arg += 1
+        }
+
+        var env: [String: String] = [:]
+        while i < end && buf[i] != 0 {
+            let start = i
+            while i < end && buf[i] != 0 { i += 1 }
+            let pair = String(decoding: buf[start..<i], as: UTF8.self)
+            if let eq = pair.firstIndex(of: "=") {
+                env[String(pair[pair.startIndex..<eq])] = String(pair[pair.index(after: eq)...])
+            }
+            i += 1
+        }
+        return env
+    }
+
+    /// The controlling terminal of `pid` in `ps`'s form (`ttys004`), or nil outside a terminal.
+    private nonisolated static func controllingTTY(of pid: pid_t) -> String? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        let rc = mib.withUnsafeMutableBufferPointer { sysctl($0.baseAddress, 4, &info, &size, nil, 0) }
+        // `e_tdev` is NODEV (-1) for a process with no controlling terminal, and 0 when the kernel
+        // has nothing to say; both mean "not in a terminal" here.
+        guard rc == 0, info.kp_eproc.e_tdev != -1, info.kp_eproc.e_tdev != 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard devname_r(info.kp_eproc.e_tdev, S_IFCHR, &buf, Int32(buf.count)) != nil else { return nil }
+        return String(cString: buf)
+    }
+
+    /// The tmux pane whose tty is `tty` (`ttys004`), as tmux names it (`%2269`).
+    private nonisolated static func paneID(forTTY tty: String) -> String? {
+        let want = Substring("/dev/" + tty)
+        // One `list-panes` for the whole server, matched here instead of in an `awk` child.
+        for line in tmux(["list-panes", "-a", "-F", "#{pane_tty} #{pane_id}"]).out.split(separator: "\n") {
+            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+            if fields.count == 2, fields[0] == want { return String(fields[1]) }
+        }
+        return nil
+    }
+
+    /// Run `tmux` and report its stdout and whether it succeeded.
+    ///
+    /// `tmux` lives in Homebrew's paths that a GUI app's `PATH` does not include, so the binary is
+    /// found by absolute path — no `sh` wrapper — and the environment is inherited untouched, so the
+    /// server (and its socket directory) is the one the user is actually attached to.
+    ///
+    /// `socket` is passed as `-S` when the caller got it from a client's own `$TMUX`: that names the
+    /// exact server socket, instead of leaving tmux to guess it from `TMUX_TMPDIR`/`TMPDIR`, which a
+    /// GUI app's environment can answer differently from the shell's.
+    private nonisolated static func tmux(_ args: [String], socket: String? = nil) -> (out: String, ok: Bool) {
+        let candidates = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux"]
+        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+        else { return ("", false) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = socket.map { ["-S", $0] + args } ?? args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        try? p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (String(data: data, encoding: .utf8) ?? "", p.terminationStatus == 0)
     }
 
     // MARK: - Terminal host
@@ -602,13 +793,14 @@ class SessionMonitor {
     /// What remains approximate is the *tab*, not the pane: a terminal with two tabs attached to
     /// **different tmux sessions** cannot say which one is in front (a terminal's focused surface is
     /// invisible from outside without Accessibility, which ocbar does not ask for, or a per-terminal
-    /// AppleScript — and Ghostty 1.3 dropped the `tty` property `focusCommand` was written against).
+    /// AppleScript — and Ghostty 1.3 dropped the `tty` property the old focus script was written
+    /// against, which is why `focusSession` no longer tries it).
     /// That residual case is why the shortener is opt-in (`ocbar.alertFocusedFold`).
     ///
     /// The walk is the ppid chain, with one hop for tmux: a pane's shell is a child of the tmux
     /// *server*, which has been daemonized (ppid 1), so the chain from the client never reaches the
     /// terminal at all. The terminal's tty is then the **client's** tty (`tmux list-clients`), and
-    /// the process holding it is a child of the app — the same routing `focusCommand` uses to find
+    /// the process holding it is a child of the app — the same routing `focusSession` uses to find
     /// the window, reused here to find the app. Outside tmux the client's own tty chain is used, and
     /// the pane question cannot be asked at all: the app is all there is to report.
     ///
