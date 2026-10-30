@@ -169,6 +169,19 @@ struct SessionInfo: Equatable {
     var updatedAt: TimeInterval = 0
     /// Context-window usage, present only when the feature is enabled and known.
     var context: SessionContext? = nil
+    /// How many of this root's descendants are running right now — the sessions
+    /// the `task` tool spawned (and anything those spawned in turn). Zero when
+    /// nothing but the root itself is working.
+    ///
+    /// Free to compute: `poll` already asks for `/api/session/active` and already
+    /// walks the `parentID` tree to decide the root's status, so the count is
+    /// those two sets intersected minus the root. The root is excluded because it
+    /// is in `active` for its own turn — a session thinking by itself runs zero
+    /// subagents.
+    ///
+    /// Not capped here: what will not fit on screen is the renderer's problem,
+    /// not the monitor's.
+    var runningSubagents: Int = 0
 }
 
 /// `5h36m` / `3h` / `12m` — the card's and the menu's one duration form.

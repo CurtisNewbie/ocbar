@@ -23,6 +23,10 @@ struct IslandRow {
     /// time, which the age beside it already says. So an empty string is a
     /// decision, not a gap.
     let stamp: String
+    /// How many subagent sessions this root is running right now, straight from
+    /// the monitor (`SessionInfo.runningSubagents`). Zero for a session working on
+    /// its own turn, which is the common case and must render as it always did.
+    let subagents: Int
 }
 
 /// The two text fields a row shows — the folder name on the row's first line and
@@ -266,6 +270,21 @@ func islandRowLineCount(hasTitle: Bool, hasContext: Bool) -> Int {
 /// card's layout and the height budget that decides how many rows fit.
 func islandRowHeight(lines: Int) -> CGFloat {
     islandRowOneLineHeight + CGFloat(max(lines, 1) - 1) * islandRowHeightPerExtraLine
+}
+
+/// A row's tooltip for the subagents its session is running, or nil when there
+/// are none.
+///
+/// It exists for the one thing the row's tally cannot say: line 1's right slot
+/// draws at most two glyphs, so at `IslandRowView.tallyCeiling` the row shows
+/// `9+` and means "ten or more". The exact count has to be said somewhere, and a
+/// tooltip is the only place in this row with room for it — it costs the folder
+/// name no width, it adds no line, and it cannot truncate. Nil rather than an
+/// empty string when there are none: the row it is set on is recycled, and a row
+/// with no tally must carry no tooltip at all.
+func islandSubagentTally(_ count: Int) -> String? {
+    guard count > 0 else { return nil }
+    return count == 1 ? "1 subagent running" : "\(count) subagents running"
 }
 
 /// Width a label needs to draw its text **without clipping** — which is wider
@@ -1226,7 +1245,8 @@ final class IslandPanel {
                 duration: row.duration,
                 pid: row.pid,
                 context: row.context,
-                stamp: row.stamp
+                stamp: row.stamp,
+                subagents: row.subagents
             )
         }
         card.rowViews = rowViews
@@ -3044,6 +3064,30 @@ private final class IslandRowView: NSView {
     /// (`5h36m · 2m`). Its own field because it must keep its measured width at
     /// the trailing edge while the folder name truncates in what is left.
     private let stampLabel = NSTextField(labelWithString: "")
+    /// How many subagents this session is running, in line 1's right slot
+    /// immediately **left of the age** — the treatment picked off a rendered
+    /// sheet (`candidate-f-orange-slot`), and the row's only number that is not a
+    /// time.
+    ///
+    /// **Digits only, in the mark's own orange** — no glyph, no `×`, no circle.
+    /// The colour is what makes the number legible as *this* fact: the slot it
+    /// joins already carries two white times (`5h36m · 2m`), so a third white
+    /// number would read as a third time, while an orange one reads as the ring
+    /// it shares its tint with (`IslandRing.runningTint`). It is the pill's own
+    /// idiom — a bare count beside the ring — moved into the row's right slot.
+    ///
+    /// **The slot is a constant 26.56pt (`tallySlotWidth`), and it is taken only
+    /// when there is a tally.** Reserving it on every row would move *today's*
+    /// folder name for every session with no subagents — the common case, which
+    /// must stay pixel-identical — so the slot exists only where the number does.
+    /// What that costs is one change on one row, the moment a session's workers
+    /// start or stop: the folder name's box grows or shrinks by 26.56pt and may
+    /// gain or lose its ellipsis. Nothing else moves: the age and the stamp are
+    /// anchored to the row's trailing inset, so `5h36m · 2m` sits exactly where it
+    /// always did with the tally inserted to its left, and a tally going 1 → 9 →
+    /// `9+` reflows nothing at all (tabular figures; the slot is measured to the
+    /// widest string).
+    private let tallyLabel = NSTextField(labelWithString: "")
     /// The alert's mark, at the row's leading edge. Inert — the card's `hitTest`
     /// hands clicks to the row view itself, so nothing here needs to claim or
     /// refuse one.
@@ -3063,6 +3107,10 @@ private final class IslandRowView: NSView {
     private var pid: Int32?
     private var hasContext = false
     private var hasStamp = false
+    /// Whether line 1 is carrying a tally this time round. `configure` sets it for every row,
+    /// recycled or not, and `layout` is the only reader — so a row that loses its tally also loses
+    /// the 26.56pt slot and its folder name gets that width back in the same pass.
+    private var hasTally = false
     private var hasTitleText = false
     private var hovering = false {
         didSet { if hovering != oldValue { needsDisplay = true } }
@@ -3108,6 +3156,43 @@ private final class IslandRowView: NSView {
     /// the row from this, and `layout()` stacks exactly these lines. The
     /// last-update stamp is not a line: it lives in line 1's right slot.
     var lineCount: Int { islandRowLineCount(hasTitle: hasTitleText, hasContext: hasContext) }
+
+    // The tally's type and its two widths, all measured off the row's own fonts rather than assumed.
+    /// The card's subordinate size at the weight every count in this app is drawn at
+    /// (`IslandMarkerGroup.numberFont` is the same construction at 11), so the pill's
+    /// counts and a row's tally are one kind of number.
+    private static let tallyFont = NSFont.monospacedDigitSystemFont(
+        ofSize: islandCardSecondaryFontSize,
+        weight: .semibold
+    )
+
+    /// Width of the widest tally, `9+`, as the cell needs to draw it: `islandLabelWidth`
+    /// gives **18.56pt**, where the bare advances add up to 13.2. A frame at the advance
+    /// shaves the `+` — the same clipping the age's `m` lost before `islandLabelWidth`
+    /// existed, so this is measured, not added up.
+    private static let tallyTextWidth: CGFloat = {
+        let reference = NSTextField(labelWithString: "\(tallyCeiling)+")
+        reference.font = tallyFont
+        return islandLabelWidth(for: reference)
+    }()
+
+    /// What the tally takes out of line 1: its own text plus the card's one column gap.
+    /// **26.56pt** — the folder name's box gives up exactly this while a tally shows
+    /// (373.78 → 347.22 on a 500pt card carrying `5h36m · 2m`), and gives up nothing when
+    /// it does not (see `tallyLabel` for why the slot is not reserved).
+    private static let tallySlotWidth = tallyTextWidth + islandRowGlyphGap
+
+    /// The largest tally drawn as digits — ten and above read `9+`, which is the widest
+    /// string and the reason the slot is measured to it. Nine itself stays exact; the cap
+    /// only ever hides the difference between ten and more, and the exact count is the
+    /// row's tooltip (`islandSubagentTally`).
+    private static let tallyCeiling = 9
+
+    /// A tally's text: the number up to nine, `9+` above it, and never a nought — zero is
+    /// not drawn at all (`hasTally`), so it is clamped here rather than trusted.
+    private static func tallyText(_ count: Int) -> String {
+        count > tallyCeiling ? "\(tallyCeiling)+" : String(max(0, count))
+    }
 
     // Geometry. This view lays its children out by frame — like the rest of the
     // island — rather than Auto Layout, because the stacked lines need exact
@@ -3171,11 +3256,19 @@ private final class IslandRowView: NSView {
         stampLabel.alignment = .right
         stampLabel.lineBreakMode = .byTruncatingTail
 
+        // The tally borrows the card's subordinate size at the weight every count in this app is drawn
+        // at (`IslandMarkerGroup.numberFont` is 11pt semibold tabular), and the mark's own orange: the
+        // number is the running state's, so it may not be a colour of its own. Right-aligned inside a
+        // fixed-width field, so `3` sits where `9+` would end and the age never has to move for either.
+        tallyLabel.font = Self.tallyFont
+        tallyLabel.textColor = IslandRing.runningTint
+        tallyLabel.alignment = .right
+
         // One field per line is the row's contract, so no field is ever allowed
         // to wrap onto the next line: each truncates at its tail instead. This is
         // belt-and-braces — `layout()` already gives every field a single-line
         // frame — but it makes the contract hold even if a frame were mis-sized.
-        for label in [nameLabel, titleLabel, durationLabel, contextLabel, stampLabel] {
+        for label in [nameLabel, titleLabel, durationLabel, contextLabel, stampLabel, tallyLabel] {
             label.usesSingleLineMode = true
         }
 
@@ -3186,12 +3279,14 @@ private final class IslandRowView: NSView {
         addSubview(contextGlyph)
         addSubview(contextLabel)
         addSubview(stampLabel)
+        addSubview(tallyLabel)
         addSubview(alertMark)
         addSubview(ring)
         titleLabel.isHidden = true
         contextGlyph.isHidden = true
         contextLabel.isHidden = true
         stampLabel.isHidden = true
+        tallyLabel.isHidden = true
         alertMark.isHidden = true
         // Set once here and never again: the mark is not sized by a pill, it is sized to the disc the
         // row draws beside it (see `ringDiameter`).
@@ -3203,7 +3298,7 @@ private final class IslandRowView: NSView {
         fatalError("init(coder:) is not used")
     }
 
-    func configure(name: String, title: String?, status: SessionStatus, duration: String, pid: Int32?, context: IslandContext?, stamp: String) {
+    func configure(name: String, title: String?, status: SessionStatus, duration: String, pid: Int32?, context: IslandContext?, stamp: String, subagents: Int) {
         self.pid = pid
         nameLabel.stringValue = name
         // The title is a line of its own, so it needs no separator and no width
@@ -3224,6 +3319,21 @@ private final class IslandRowView: NSView {
         ring.running = isRunning
         glyph.isHidden = isRunning
         glyph.image = appearance.symbol.flatMap { islandSymbolImage(symbol: $0, color: appearance.color) }
+        // The tally exists only where the mark does, and that is a colour decision rather than a
+        // convenience: the number is drawn in `IslandRing.runningTint`, so on a row whose glyph column
+        // carries a green check, a blue question mark or a red triangle it would claim "running" in the
+        // running colour for a session that is not running. The card has one mark per row and the monitor
+        // ranks those states above busy (`SessionMonitor.poll`), so a row that trades its ring for a
+        // question mark trades the tally with it. Both are forced off here, from the same `isRunning` the
+        // ring is hidden on, so a recycled view can never keep the session it used to show: no stale
+        // number, no stale tooltip, and `hasTally` false means `layout` puts the 26.56pt slot back into
+        // the name.
+        hasTally = isRunning && subagents > 0
+        tallyLabel.isHidden = !hasTally
+        tallyLabel.stringValue = hasTally ? Self.tallyText(subagents) : ""
+        // `9+` is the one thing the slot cannot say, so the exact count rides the tooltip — the row's
+        // only surface with room for it that costs the folder name no width.
+        toolTip = hasTally ? islandSubagentTally(subagents) : nil
 
         hasContext = context != nil
         contextLabel.isHidden = context == nil
@@ -3314,7 +3424,25 @@ private final class IslandRowView: NSView {
             width: durationWidth,
             height: durationSize.height
         )
-        let nameWidth = max(0, durationLabel.frame.minX - islandRowGlyphGap - islandRowTextInset)
+        // The tally, immediately left of the age and inside the same right slot, so the two times keep
+        // their trailing anchor and stay one reading (`5h36m · 2m`) whether or not a tally precedes them.
+        // Its field is the width of the widest tally and its text is right-aligned in it, so `3` ends
+        // where `9+` would — nothing here is measured from the current number, which is what makes the
+        // age's x a constant for every tally.
+        if hasTally {
+            let tallySize = tallyLabel.intrinsicContentSize
+            tallyLabel.frame = NSRect(
+                x: durationLabel.frame.minX - Self.tallySlotWidth,
+                y: nameCenterY - tallySize.height / 2,
+                width: Self.tallyTextWidth,
+                height: tallySize.height
+            )
+        }
+        // The folder name ends where line 1's right slot begins: at the tally when there is one, at the
+        // age when there is not — which is the pre-tally geometry exactly, so a row without a tally is
+        // pixel-identical to the row this feature found.
+        let slotLeft = hasTally ? tallyLabel.frame.minX : durationLabel.frame.minX
+        let nameWidth = max(0, slotLeft - islandRowGlyphGap - islandRowTextInset)
         let nameSize = nameLabel.intrinsicContentSize
         nameLabel.frame = NSRect(
             x: islandRowTextInset,

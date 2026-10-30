@@ -133,6 +133,10 @@ class SessionMonitor {
             let descendants = descendantIDs(of: id, children: children)
             let isWaiting = !descendants.isDisjoint(with: waiting)
             let isBusy = !descendants.isDisjoint(with: active)
+            // The subagent tally: active descendants, minus the root — the root is in `active`
+            // while it works on its own turn, which is not a subagent. Same two sets the
+            // status above is derived from, so this costs no request.
+            let runningSubagents = descendants.intersection(active).subtracting([id]).count
             let outcome = s["outcome"] as? String
 
             let status: SessionStatus
@@ -156,7 +160,8 @@ class SessionMonitor {
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
             sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid,
                                         sessionTitle: s["title"] as? String,
-                                        createdAt: created, updatedAt: updated))
+                                        createdAt: created, updatedAt: updated,
+                                        runningSubagents: runningSubagents))
         }
 
         // A revert/fork leaves the original session behind as a separate root.

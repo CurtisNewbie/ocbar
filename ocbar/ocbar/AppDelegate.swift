@@ -900,7 +900,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 duration: showSessionTime ? formatDurationLabel(sinceMS: session.createdAt, nowMS: nowMS) : "",
                 pid: session.clientPID,
                 context: islandContext(for: session),
-                stamp: showSessionTime ? formatStampLabel(updatedMS: session.updatedAt, createdMS: session.createdAt, nowMS: nowMS) : ""
+                stamp: showSessionTime ? formatStampLabel(updatedMS: session.updatedAt, createdMS: session.createdAt, nowMS: nowMS) : "",
+                subagents: session.runningSubagents
             )
         }
     }
