@@ -130,6 +130,9 @@ private let islandRowGlyphGap: CGFloat = 8
 /// gap. Every line of a row starts here — the summary too, so `+k more` lands
 /// under the session names rather than under their status glyphs.
 private let islandRowTextInset = islandRowLeadingInset + islandRowGlyphSize + islandRowGlyphGap
+/// How far a band glyph rides above its slot centre. Both the warn triangle and
+/// the critical octagon read half a point low against the text at this size.
+private let islandBandGlyphRise: CGFloat = 0.5
 
 /// The separator inside line 1's right slot: `5h36m · 2m`. The age and the
 /// last-update stamp are two answers to the same question — how long — so they
@@ -3106,6 +3109,9 @@ private final class IslandRowView: NSView {
     private var tracking: NSTrackingArea?
     private var pid: Int32?
     private var hasContext = false
+    /// Band of the context line currently shown, so `layout` can lift a band glyph
+    /// (`islandBandGlyphRise`) without re-reading the presentation.
+    private var contextBand: ContextBand?
     private var hasStamp = false
     /// Whether line 1 is carrying a tally this time round. `configure` sets it for every row,
     /// recycled or not, and `layout` is the only reader — so a row that loses its tally also loses
@@ -3336,6 +3342,7 @@ private final class IslandRowView: NSView {
         toolTip = hasTally ? islandSubagentTally(subagents) : nil
 
         hasContext = context != nil
+        contextBand = context?.band
         contextLabel.isHidden = context == nil
         contextGlyph.isHidden = true
         contextGlyph.image = nil
@@ -3471,7 +3478,8 @@ private final class IslandRowView: NSView {
                 // fixed even when there is no band glyph, so alignment never
                 // shifts. The line is the context's alone: the stamp belongs to
                 // line 1's right slot, so nothing here competes for width.
-                contextGlyph.frame = NSRect(x: islandRowLeadingInset, y: centreYValue - islandRowGlyphSize / 2,
+                let glyphRise = contextBand?.inBand == true ? islandBandGlyphRise : 0
+                contextGlyph.frame = NSRect(x: islandRowLeadingInset, y: centreYValue - islandRowGlyphSize / 2 - glyphRise,
                                             width: islandRowGlyphSize, height: islandRowGlyphSize)
                 let size = contextLabel.intrinsicContentSize
                 contextLabel.frame = NSRect(
