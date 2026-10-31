@@ -2,6 +2,9 @@
 
 macOS menubar app that monitors [OpenCode](https://opencode.ai) sessions across all your terminals.
 
+<img src="assets/ocbar-island.png" height="180" alt="The ocbar island in the menubar: a running ring, the number of busy sessions, then error, waiting and idle counts">
+<img src="assets/ocbar-card.png" height="320" alt="The expanded island card listing four sessions, each with folder name, title, context usage and age">
+
 > **OpenCode v2 required.** ocbar targets OpenCode v2 only. v1 users should use git tag `oc_v1` (`git checkout oc_v1`), the last v1-compatible version.
 
 ## Features
