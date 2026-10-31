@@ -89,6 +89,7 @@ struct ContextUsagePresentation: Equatable {
     static let noCompletedTurn = "Context — no completed turn yet"
     static let unknownLimit = "Context unknown — model limit unavailable"
 
+    /// `warn` and `critical` are absolute token counts, not percentages.
     init(context: SessionContext?, warn: Int, critical: Int) {
         guard let context else {
             content = .placeholder(Self.noCompletedTurn)
@@ -103,9 +104,9 @@ struct ContextUsagePresentation: Equatable {
             return
         }
         let pct = Self.percent(used: context.used, limit: limit, fraction: context.fraction)
-        if pct >= critical {
+        if context.used >= critical {
             band = .critical
-        } else if pct >= warn {
+        } else if context.used >= warn {
             band = .warn
         } else {
             band = .none

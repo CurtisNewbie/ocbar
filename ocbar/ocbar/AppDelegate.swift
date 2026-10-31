@@ -95,10 +95,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let contextUsageDisplayKey = "ocbar.contextUsageDisplay"
     private let contextUsageWarnKey = "ocbar.contextUsageWarn"
     private let contextUsageCriticalKey = "ocbar.contextUsageCritical"
-    private let defaultContextUsageWarn = 80
-    private let defaultContextUsageCritical = 95
-    private static let contextWarnOptions = [70, 80, 90]
-    private static let contextCriticalOptions = [90, 95, 98]
+    private let defaultContextUsageWarn = 200_000
+    private let defaultContextUsageCritical = 300_000
+    /// One shared list of absolute token counts (0.2M…0.9M) for both thresholds.
+    private static let contextBandOptions = stride(from: 200_000, through: 900_000, by: 100_000).map { $0 }
 
     /// Width of the status-glyph slot a session menu row uses, measured from the
     /// same symbols/config `sessionItem` draws them with. The detail row mirrors
@@ -398,13 +398,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return display
     }
 
+    /// Old builds stored percentages here; anything outside the token band is
+    /// silently treated as unset, so those values migrate to the new defaults.
     private var contextUsageWarn: Int {
-        guard let stored = UserDefaults.standard.object(forKey: contextUsageWarnKey) as? Int else { return defaultContextUsageWarn }
+        guard let stored = UserDefaults.standard.object(forKey: contextUsageWarnKey) as? Int,
+              Self.contextBandOptions.contains(stored) else { return defaultContextUsageWarn }
         return stored
     }
 
     private var contextUsageCritical: Int {
-        guard let stored = UserDefaults.standard.object(forKey: contextUsageCriticalKey) as? Int else { return defaultContextUsageCritical }
+        guard let stored = UserDefaults.standard.object(forKey: contextUsageCriticalKey) as? Int,
+              Self.contextBandOptions.contains(stored) else { return defaultContextUsageCritical }
         return stored
     }
 
@@ -427,16 +431,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         submenu.addItem(.separator())
 
-        for value in Self.contextWarnOptions {
-            let item = NSMenuItem(title: "Warn at \(value)%", action: #selector(contextUsageWarnSelected(_:)), keyEquivalent: "")
+        for value in Self.contextBandOptions {
+            let item = NSMenuItem(title: "Warn at \(compactTokens(value))", action: #selector(contextUsageWarnSelected(_:)), keyEquivalent: "")
             item.target = self
             item.tag = value
             item.state = value == contextUsageWarn ? .on : .off
             submenu.addItem(item)
         }
 
-        for value in Self.contextCriticalOptions {
-            let item = NSMenuItem(title: "Critical at \(value)%", action: #selector(contextUsageCriticalSelected(_:)), keyEquivalent: "")
+        for value in Self.contextBandOptions {
+            let item = NSMenuItem(title: "Critical at \(compactTokens(value))", action: #selector(contextUsageCriticalSelected(_:)), keyEquivalent: "")
             item.target = self
             item.tag = value
             item.state = value == contextUsageCritical ? .on : .off
@@ -462,13 +466,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func contextUsageWarnSelected(_ sender: NSMenuItem) {
-        guard Self.contextWarnOptions.contains(sender.tag) else { return }
+        guard Self.contextBandOptions.contains(sender.tag) else { return }
         UserDefaults.standard.set(sender.tag, forKey: contextUsageWarnKey)
         render(currentState, forceMenuRefresh: true)
     }
 
     @objc private func contextUsageCriticalSelected(_ sender: NSMenuItem) {
-        guard Self.contextCriticalOptions.contains(sender.tag) else { return }
+        guard Self.contextBandOptions.contains(sender.tag) else { return }
         UserDefaults.standard.set(sender.tag, forKey: contextUsageCriticalKey)
         render(currentState, forceMenuRefresh: true)
     }

@@ -6,7 +6,7 @@ This file documents the optional per-session context-window readout: where its n
 
 - Off by default; when on it shows on the dropdown's detail row and, when the island is on too, as the island row's third line.
 - Filled by `SessionMonitor.fillContext` and carried as `SessionInfo.context` (`SessionContext{used, limit, fraction}`, `Models.swift`). Per-session refresh is throttled to 2s.
-- Gated on `UserDefaults` keys `ocbar.contextUsage` (master, default false), `ocbar.contextUsageDisplay` (`percent`|`tokens`|`both`, default `both`), `ocbar.contextUsageWarn` (default 80) and `ocbar.contextUsageCritical` (default 95), all menu-driven in `contextUsageMenu()`.
+- Gated on `UserDefaults` keys `ocbar.contextUsage` (master, default false), `ocbar.contextUsageDisplay` (`percent`|`tokens`|`both`, default `both`), `ocbar.contextUsageWarn` (default `200000`) and `ocbar.contextUsageCritical` (default `300000`), all menu-driven in `contextUsageMenu()`. The two thresholds are **absolute token counts**, each offered as 200k–900k in 100k steps; a stored value outside that set (e.g. the old percent values) is treated as unset.
 
 ## Where the numbers come from
 
@@ -17,7 +17,7 @@ This file documents the optional per-session context-window readout: where its n
 
 ## Presentation invariants
 
-- The dropdown and the island cannot disagree: thresholds, wording, display mode and banding are resolved once in `Models.swift` (`ContextUsagePresentation`, `ContextBand`, `ContextDisplayMode`, `compactTokens`) and consumed by both `contextDetailItem` and `AppDelegate.islandContext`.
+- The dropdown and the island cannot disagree: thresholds, wording, display mode and banding are resolved once in `Models.swift` (`ContextUsagePresentation`, `ContextBand`, `ContextDisplayMode`, `compactTokens`) and consumed by both `contextDetailItem` and `AppDelegate.islandContext`. The band compares `used` (tokens) against the thresholds, not the percentage — a model whose ceiling is below the warn threshold therefore never colours.
 - A non-positive model `limit` must be treated as unknown rather than divided by (it once trapped on a divide by zero).
 - The dropdown row is an indented, non-actionable item whose leading badge image is the session row's own glyph width (`contextDetailItem(for:)`), which is what aligns its text under the session name; `contextDetailExtraInset` is the tuning knob.
 
