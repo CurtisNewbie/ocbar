@@ -8,7 +8,7 @@ This file documents how ocbar finds the OpenCode service, decides which sessions
 
 ## Discovery and HTTP polling
 
-- Discovery reads `~/.local/state/opencode/service.json` (url, pid, version, password) to locate the single shared OpenCode v2 service, and authenticates with HTTP Basic auth (username `opencode`, password from that file).
+- Discovery reads `~/.local/state/opencode/service.json` (url, pid, version, password) to locate the single shared OpenCode v2 service, and authenticates with HTTP Basic auth (username `opencode`, password from that file). The published `url` is the address the service *binds* — v2.2.0 writes `http://0.0.0.0:<port>` — so an unspecified host is rewritten to `127.0.0.1` before use: `URLSession` rejects `0.0.0.0` outright (-1000), which fails the health check and blanks the island while every session is running.
 - Polling hits `GET /api/info` (health/identity), `GET /api/session/active` (busy sessions), `GET /api/session?limit=100&order=desc` (session list incl. project directory), and `GET /api/form` / `GET /api/permission/request` scoped by `location[directory]=<dir>` (pending user input).
 
 ## Which sessions appear

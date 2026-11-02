@@ -83,8 +83,20 @@ class SessionMonitor {
               let urlString = json["url"] as? String,
               let password = json["password"] as? String,
               let pid = (json["pid"] as? NSNumber)?.int32Value,
-              let url = URL(string: urlString) else { return nil }
+              let url = URL(string: urlString).flatMap(Self.connectable) else { return nil }
         return ServiceEndpoint(url: url, password: password, pid: pid)
+    }
+
+    /// The service publishes the address it **binds** (v2.2.0 writes `http://0.0.0.0:<port>`), which
+    /// is not a destination: `URLSession` refuses an unspecified host outright (-1000, `bad URL`), so
+    /// every request — including the `api/info` health check — fails and the island goes blank while
+    /// the sessions are all still running. Rewrite an unspecified host to loopback; anything else is
+    /// used as published.
+    private static func connectable(_ url: URL) -> URL? {
+        guard let host = url.host, host == "0.0.0.0" || host == "::" else { return url }
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        components.host = "127.0.0.1"
+        return components.url
     }
 
     private func isReady(_ endpoint: ServiceEndpoint) async -> Bool {
