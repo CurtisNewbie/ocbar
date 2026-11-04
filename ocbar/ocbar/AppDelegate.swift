@@ -95,6 +95,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let contextUsageDisplayKey = "ocbar.contextUsageDisplay"
     private let contextUsageWarnKey = "ocbar.contextUsageWarn"
     private let contextUsageCriticalKey = "ocbar.contextUsageCritical"
+    /// The collapsed pill's server-CPU readout. Not `cpuUsage`: the number is a share of **one core**
+    /// and can pass 100, so "usage" would read as whole-machine.
+    private let serviceCPUKey = "ocbar.serviceCPU"
     private let defaultContextUsageWarn = 200_000
     private let defaultContextUsageCritical = 300_000
     /// One shared list of absolute token counts (0.2M…0.9M) for both thresholds.
@@ -196,7 +199,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // @MainActor type, so hop its push onto the main actor explicitly.
         let islandSnapshot = islandRows(for: state.sessions)
         let islandIsEnabled = islandEnabled
-        Task { @MainActor [island] in island?.update(rows: islandSnapshot, enabled: islandIsEnabled) }
+        // Gated here as well as in the monitor, so toggling the readout takes effect on this very
+        // tick instead of on the next 2s sample — and so the pill never draws a value whose geometry
+        // has just been switched off.
+        let islandCPU = serviceProcessorCPUEnabled ? state.serviceCPU : nil
+        Task { @MainActor [island] in
+            island?.update(rows: islandSnapshot, enabled: islandIsEnabled, serviceCPU: islandCPU)
+        }
 
         let sessions = state.sessions
         guard forceMenuRefresh || sessions != lastSessions else { return }
@@ -232,6 +241,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(showSessionTimeMenu())
         menu.addItem(showSessionTitlesMenu())
         menu.addItem(contextUsageMenu())
+        menu.addItem(serviceCPUMenu())
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit ocbar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
@@ -491,6 +501,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func contextUsageCriticalSelected(_ sender: NSMenuItem) {
         guard Self.contextBandOptions.contains(sender.tag) else { return }
         UserDefaults.standard.set(sender.tag, forKey: contextUsageCriticalKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    // MARK: - Server CPU
+
+    /// The pill's server-CPU readout; **default on** — a readout hidden behind a menu is a no-op
+    /// feature. The same key is read by `SessionMonitor` (the sampling) and by
+    /// `CollapsedContentView` (the geometry).
+    private var serviceProcessorCPUEnabled: Bool {
+        (UserDefaults.standard.object(forKey: serviceCPUKey) as? Bool) ?? true
+    }
+
+    /// One checkable item, not a submenu: the readout has nothing to configure — it is a percentage —
+    /// so it is the same shape as `Show session time`.
+    private func serviceCPUMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Show server CPU", action: #selector(serviceCPUToggled(_:)), keyEquivalent: "")
+        item.target = self
+        item.state = serviceProcessorCPUEnabled ? .on : .off
+        return item
+    }
+
+    @objc private func serviceCPUToggled(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(!serviceProcessorCPUEnabled, forKey: serviceCPUKey)
         render(currentState, forceMenuRefresh: true)
     }
 

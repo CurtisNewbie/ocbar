@@ -245,6 +245,13 @@ enum AggregateStatus {
 struct AppState {
     var sessions: [SessionInfo] = []
 
+    /// The OpenCode **server** process's own CPU, as a share of **one core** in percent — so it can
+    /// read past 100, and 100 is not "the machine is saturated". Nil means unknown: the feature is
+    /// off, or this tick had no honest reading. It is a **readout and nothing else** — the island's
+    /// running mark keeps reading only `counts[.busy] > 0`, because high CPU is not a session that
+    /// is running (a server idling on a big session, or its own tool subprocesses, is not work).
+    var serviceCPU: Double?
+
     var aggregate: AggregateStatus {
         if sessions.isEmpty { return .none }
         if sessions.contains(where: { $0.status == .error }) { return .error }

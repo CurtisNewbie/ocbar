@@ -7,6 +7,118 @@ private struct ServiceEndpoint {
     let pid: Int32
 }
 
+/// `proc_pidinfo` is not exported by the CLT SDK's Darwin module, so the symbol is bound by name.
+///
+/// `proc_taskinfo` (and `PROC_PIDTASKINFO`) **are** in that module and are used as they come:
+/// a hand-written layout with `pti_threads_user`/`system` as `Int32` measures 88 instead of 96,
+/// and `proc_pidinfo` then answers 0 with `ENOMEM` — a silent failure. The stride check in
+/// `ServiceCPUSampler.sample` is what makes that kind of mismatch visible instead of a zero.
+@_silgen_name("proc_pidinfo")
+private func ocbar_proc_pidinfo(_ pid: Int32, _ flavor: Int32, _ arg: UInt64,
+                                _ buffer: UnsafeMutableRawPointer?, _ buffersize: Int32) -> Int32
+
+/// The server process's CPU, read from the kernel and smoothed.
+///
+/// **Only the `service.json` pid is sampled.** CPU spent in the server's own tool subprocesses
+/// (`bash`, `git`, a test run) is not counted, so a session in the middle of a build can look
+/// quiet here — this is the server's share, not the work the server is waiting on.
+private struct ServiceCPUSampler {
+
+    /// The process the baseline belongs to. A different pid is a different process, so the
+    /// baseline resets rather than being billed across a restart (or a reused pid).
+    private var pid: pid_t?
+    /// `pti_total_user + pti_total_system`, in `mach_absolute_time` units.
+    private var lastTotal: UInt64?
+    private var lastMach: UInt64?
+    /// Wall clock, for the gap test only: a wake from sleep advances `Date` by hours whether or
+    /// not the process's totals and the mach clock moved with it, and a tick that long is not a
+    /// measurement.
+    private var lastAt: Date?
+    private var smoothed: Double?
+
+    /// Asymmetric: a rise is shown at once (a build starting is what the eye is watching for),
+    /// a fall is damped so one quiet tick does not erase the reading.
+    private static let riseAlpha = 0.6
+    private static let fallAlpha = 0.2
+    /// Three missed scan ticks (the monitor's 2s cadence) and the window is not a window.
+    private static let staleAfter: TimeInterval = 3 * 2
+    /// One core, and the readout has three digits. The clamp is applied **before** the smoother:
+    /// pid reuse or a bogus delta must not pin the EMA at a nonsense level.
+    private static let maxPercent = 999.0
+
+    mutating func reset() {
+        pid = nil
+        lastTotal = nil
+        lastMach = nil
+        lastAt = nil
+        smoothed = nil
+    }
+
+    /// The smoothed share of one core in percent, or nil when there is nothing honest to draw: no
+    /// baseline yet (a first reading is never a `0%`), a gap too long to blame on the process, or a
+    /// pid the kernel would not report. **Every failure re-baselines** — otherwise the next
+    /// successful sample would count the whole outage as CPU.
+    mutating func sample(pid newPID: pid_t) -> Double? {
+        if pid != newPID {
+            reset()
+            pid = newPID
+        }
+
+        var info = proc_taskinfo()
+        let size = Int32(MemoryLayout<proc_taskinfo>.stride)
+        let returned = withUnsafeMutablePointer(to: &info) {
+            ocbar_proc_pidinfo(newPID, PROC_PIDTASKINFO, 0, $0, size)
+        }
+        guard returned == size else {
+            lastTotal = nil
+            lastMach = nil
+            lastAt = nil
+            smoothed = nil
+            return nil
+        }
+
+        let total = info.pti_total_user &+ info.pti_total_system
+        let now = mach_absolute_time()
+        let at = Date()
+
+        guard let baseTotal = lastTotal, let baseMach = lastMach, let baseAt = lastAt else {
+            lastTotal = total
+            lastMach = now
+            lastAt = at
+            return nil
+        }
+
+        let elapsed = at.timeIntervalSince(baseAt)
+        guard elapsed > 0, elapsed <= Self.staleAfter, now > baseMach, total >= baseTotal else {
+            // Re-baseline only: this tick is not a measurement, so it must not be folded in as one.
+            lastTotal = total
+            lastMach = now
+            lastAt = at
+            smoothed = nil
+            return nil
+        }
+
+        // **Units: the ratio needs no timebase conversion.** `pti_total_*` are in mach_absolute_time
+        // units, the same clock as the denominator; reading them as nanoseconds would be off by
+        // ~41× on this machine.
+        let instant = min(Self.maxPercent,
+                           max(0, 100 * Double(total - baseTotal) / Double(now - baseMach)))
+
+        let value: Double
+        if let previous = smoothed {
+            value = previous + (instant > previous ? Self.riseAlpha : Self.fallAlpha) * (instant - previous)
+        } else {
+            value = instant
+        }
+
+        smoothed = value
+        lastTotal = total
+        lastMach = now
+        lastAt = at
+        return value
+    }
+}
+
 @MainActor
 class SessionMonitor {
     private(set) var state = AppState()
@@ -27,6 +139,8 @@ class SessionMonitor {
     /// 0.5s poll does not re-fetch each time.
     private var contextCache: [String: (ctx: SessionContext, fetchedAt: Date)] = [:]
     private let contextRefreshInterval: TimeInterval = 2
+    /// The server's own CPU, sampled once per scan tick. See `ServiceCPUSampler`.
+    private var cpuSampler = ServiceCPUSampler()
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
@@ -62,10 +176,22 @@ class SessionMonitor {
             // No service, no live clients: the pane hints go too, so a click never acts on a pid that
             // has since been reused.
             focusByPID = [:]
+            // And no server, no CPU reading: the baseline dies with the endpoint, so a server that
+            // comes back (or a different one) is re-baselined instead of billed the outage.
+            cpuSampler.reset()
+            state.serviceCPU = nil
             await poll()
             return
         }
         service = endpoint
+        // Once per tick, outside the session loop: it is about one process, not about a session.
+        // **It is a readout only** — nothing in this class derives the ring from it.
+        if serviceCPUEnabled {
+            state.serviceCPU = cpuSampler.sample(pid: endpoint.pid)
+        } else {
+            cpuSampler.reset()
+            state.serviceCPU = nil
+        }
         let pid = endpoint.pid
         let clients = await Task.detached {
             SessionMonitor.attachedClients(servicePID: pid)
@@ -247,13 +373,25 @@ class SessionMonitor {
         return waiting
     }
 
-    // MARK: - Context-window usage
+    // MARK: - Feature gates
 
-    /// Feature gate; default off. Reads `UserDefaults` directly so it reflects
+    /// Context-window gate; default off. Reads `UserDefaults` directly so it reflects
     /// toggles without an app restart.
     private var contextUsageEnabled: Bool {
         (UserDefaults.standard.object(forKey: "ocbar.contextUsage") as? Bool) ?? false
     }
+
+    /// Gate for the server-CPU readout; **default on** — a readout hidden behind a menu is a no-op
+    /// feature. Reads `UserDefaults` directly so a toggle needs no restart.
+    ///
+    /// The key name is duplicated in `AppDelegate` (the menu) and in `CollapsedContentView` (the
+    /// geometry): three readers of one key, on purpose, so neither the sampling nor the width can be
+    /// switched on without the other.
+    private var serviceCPUEnabled: Bool {
+        (UserDefaults.standard.object(forKey: "ocbar.serviceCPU") as? Bool) ?? true
+    }
+
+    // MARK: - Context-window usage
 
     /// Fill each visible session's `context` before publishing. Only runs when
     /// enabled; the `/api/model` map is TTL-cached and each session is refreshed

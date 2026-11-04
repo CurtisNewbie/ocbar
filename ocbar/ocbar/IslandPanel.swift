@@ -94,13 +94,14 @@ struct IslandContext: Equatable {
 ///
 /// One constant, not two, because symmetry is what sets it: `CollapsedContentView.flankWidth`
 /// is the wider of the two sides' content requirements, applied to both. The sides want
-/// different amounts — the left holds the ring and the running badge (62pt of content plus
-/// clearance), the right holds the three remaining states (130) — and taking the smaller for
-/// the right would be the one thing this pill may not do: the right flank would be
-/// under-provisioned, and `place` trims an overrun at the capsule edge *silently*, so a
-/// fourteen-session finished count would be drawn as `1`. Symmetry at the smaller width would
-/// also be no symmetry at all, since the left's content would then decide the width anyway.
-/// So both wings are 130 and the spare room on the left is the price of a balanced capsule.
+/// different amounts — the left holds the ring, the running count and the `CPU · 16%` readout
+/// (107.3pt of content plus clearance), the right holds the three remaining states (130) — and
+/// taking the smaller for the right would be the one thing this pill may not do: the right
+/// flank would be under-provisioned, and `place` trims an overrun at the capsule edge
+/// *silently*, so a fourteen-session finished count would be drawn as `1`. Symmetry at the
+/// smaller width would also be no symmetry at all, since the left's content would then decide
+/// the width anyway. So both wings are 130 and the spare room on the left is the price of a
+/// balanced capsule.
 ///
 /// The pill reads left to right as two different questions:
 ///
@@ -353,14 +354,16 @@ private let islandPlainCollapsedHeight: CGFloat = 24
 /// **Floored again by what it has to hold**, and that floor is load-bearing: the share alone is
 /// 0.14 × screenWidth, so a 1024pt-wide display asks for 143pt and clamps up to the 160 floor —
 /// and the block that capsule holds in its worst case (ring + the three two-digit badges + the
-/// bare two-digit running count + the gaps between them,
-/// `CollapsedContentView.standInCapsuleMinWidth` = 172) is *wider than 160*. That is the
+/// bare two-digit running count + the `CPU · 999%` readout + the gaps between them,
+/// `CollapsedContentView.standInCapsuleMinWidth` = 249) is *wider than both*. That is the
 /// silent-failure shape this pill is built to avoid: `place` centres what it can and the view's
-/// mask trims the rest, so the finished count would be drawn as `1`. The content floor is
-/// therefore a floor on top of the fraction, not a replacement for it — on a 1512pt display the
-/// share (211.7) is what sets the width, the floor only ever lifts a smaller one (below 1228pt
-/// the share is under 172), and the 240 cap binds from 1714pt up, so the capsule can never
-/// become a band.
+/// mask trims the rest, so the finished count would be drawn as `1`.
+///
+/// The floor is now **wider than the 240 cap**, so it wins everywhere: `max` lifts every share to
+/// it, and the fraction and the cap only ever matter if the content floor shrinks back under them.
+/// That is the honest state, not a bug — the readout is a fixed 62.7pt of provision and the block
+/// has to hold it — but it means the capsule's size is now a property of the *content*, and this
+/// function is its only override.
 func islandStandInCapsuleWidth(screenWidth: CGFloat) -> CGFloat {
     let share = min(max(screenWidth * fakeNotchFraction, fakeNotchMinWidth), fakeNotchMaxWidth)
     return max(share, CollapsedContentView.standInCapsuleMinWidth)
@@ -618,7 +621,10 @@ final class IslandPanel {
     /// leave the app with no UI at all — the card's empty line says `No OpenCode sessions` and its footer
     /// gear still reaches the menu. Only `!enabled` (and `retire()`, for a display that is gone) takes the
     /// panel off screen.
-    func update(rows newRows: [IslandRow], enabled: Bool) {
+    ///
+    /// `serviceCPU` rides along with the rows rather than through a second entry point: it is one more
+    /// thing the pill draws on the same tick, and a separate push would let the two land out of order.
+    func update(rows newRows: [IslandRow], enabled: Bool, serviceCPU: Double?) {
         guard enabled else {
             hide()
             return
@@ -630,6 +636,7 @@ final class IslandPanel {
         let actionRowChanged = syncActionRow()
 
         rows = newRows
+        self.serviceCPU = serviceCPU
         // The fold and the rows it renders, from the same helper the alert's own arm/end use: the card's
         // listed set is derived from `alertArmed` (`recomputeFold`), so both callers have to run exactly
         // this and only this, or one of them would show a card the other's state disagrees with.
@@ -771,6 +778,9 @@ final class IslandPanel {
     private var rowViews: [IslandRowView] = []
 
     private var rows: [IslandRow] = []
+    /// The server's own CPU for this tick, passed through to the pill with the rows. Nil = unknown:
+    /// the feature is off, or there was no honest reading.
+    private var serviceCPU: Double?
     /// The prefix of the card's *listed* rows that fits the height budget, and how many were
     /// folded into the summary. Both are recomputed every tick from the current
     /// screen, and are the single source of truth for the card's layout, the
@@ -1388,6 +1398,9 @@ final class IslandPanel {
     /// changes.
     private func refreshCollapsed() {
         collapsedView?.counts = Self.statusCounts(rows)
+        // A whole percentage, because the pill draws one: the rounding, the cap at 999 and the display
+        // deadband all live in `IslandCPUView`, which is the only thing that knows what is on screen.
+        collapsedView?.cpu = serviceCPU.map { Int($0.rounded()) }
     }
 
     /// Sessions per state, for the pill. Every state is counted and every count is
@@ -2107,18 +2120,25 @@ private final class CollapsedContentView: NSView {
 
     /// Least width the **stand-in capsule** needs on a display with no cutout, where the ring and
     /// all four counts sit in one centred block: the ring, the three glyph+count badges of the right
-    /// flank, the running slot's **bare count**, the gaps between them and the same clearance the wings
-    /// use. This is the floor `islandStandInCapsuleWidth` puts under its screen share; without it the
-    /// share's own 160pt floor is narrower than the block, and the last count would be trimmed at the
-    /// capsule's edge — a wrong count, silently, on a small external display.
+    /// flank, the running slot's **bare count**, the server-CPU readout, the gaps between them and the
+    /// same clearance the wings use. This is the floor `islandStandInCapsuleWidth` puts under its
+    /// screen share; without it the share's own 160pt floor is narrower than the block, and the last
+    /// count would be trimmed at the capsule's edge — a wrong count, silently, on a small external
+    /// display.
     ///
     /// The running slot is the one item here that costs a count and no glyph, which is why the block is
-    /// 19pt narrower (172) than it was while that slot still carried a glyph (191).
+    /// 19pt narrower than it was while that slot still carried a glyph. The readout adds its gap and
+    /// its `CPU · 999%` width on top — **249** with the readout, 178 without — and it is counted here
+    /// **even when its gate is off**: this is a floor, and the tail air on a cutout-less display costs
+    /// nothing, whereas making it move with the gate would need a rebuilt window for no visible gain.
+    /// It is now above `islandStandInCapsuleWidth`'s 240 cap, so on a display with no cutout the floor
+    /// is what sets the capsule everywhere and the cap never binds.
     static let standInCapsuleMinWidth: CGFloat = {
-        let items = 1 + badgeStatuses.count
+        let items = 2 + badgeStatuses.count
         let content = IslandRing.diameterCap
             + CGFloat(badgeStatuses.count - 1) * twoDigitBadgeWidth
             + twoDigitCountWidth
+            + cpuGap + IslandCPUView.widestWidth
         let gaps = CGFloat(items - 1) * groupGap
         return (content + gaps + 2 * minFlankClearance + flankMargin).rounded(.up)
     }()
@@ -2130,12 +2150,16 @@ private final class CollapsedContentView: NSView {
     /// not do. Every extra point sits over the menubar strip either side of the cutout.
     static let flankWidth: CGFloat = max(requiredLeftFlankWidth, requiredRightFlankWidth)
 
-    /// What the **left** flank's content costs at its widest: the ring, the gap, and the running slot's
-    /// two-digit **count**. No glyph in that sum any more — the ring is the running mark, so the count is
-    /// drawn bare (`show(_:count:in:)`). The flank is wider than this once symmetry is taken into account,
-    /// and this is the width its content is centred against (`leftContentInset`).
+    /// What the **left** flank's content costs at its widest: the ring, the gap, the running slot's
+    /// two-digit **count**, then the server-CPU readout and its own gap. No glyph in that sum any
+    /// more — the ring is the running mark, so the count is drawn bare (`show(_:count:in:)`). The
+    /// flank is wider than this once symmetry is taken into account, and this is the width its
+    /// content is centred against (`leftContentInset`).
+    ///
+    /// 12 + 6 + 18.565 + 8 + 62.737 = **107.301**, and `serviceCPUWidth` is 0 when the readout's gate
+    /// is off (36.565, exactly what this was before it existed).
     private static var leftContentWidth: CGFloat {
-        IslandRing.diameterCap + groupGap + twoDigitCountWidth
+        IslandRing.diameterCap + groupGap + twoDigitCountWidth + serviceCPUWidth
     }
 
     /// Where the left flank's content starts, so the pair it is provisioned for sits **centred**
@@ -2150,10 +2174,52 @@ private final class CollapsedContentView: NSView {
     /// wider, not as a hole in the pill.
     ///
     /// The offset follows `leftContentWidth`, so the *pair* stays centred in the wing: dropping the
-    /// running slot's glyph moved the ring 37 → 47 in one step, and it stays at 47 in both states —
-    /// that constancy is what this number is for, not the value itself.
+    /// running slot's glyph moved the ring 37 → 47 in one step, and it stayed there while the flank
+    /// held nothing but the ring and the count. Every move since is the readout's *existence* or its
+    /// ink, never a count: 47 → 27 when it was first provisioned, → 13 when the label grew the
+    /// `CPU · ` prefix, → **11** at the 9.5pt provision (`round((130 − 107.301) / 2)`). It is a fixed
+    /// offset in every state, which is what this number is for, not the value itself.
     static var leftContentInset: CGFloat {
         ((flankWidth - leftContentWidth) / 2).rounded()
+    }
+
+    /// Space between the running count and the CPU readout. **Not `groupGap`**: 6 means "same
+    /// group", and the readout is not part of the ring+count pair. It is not a `place` gap either —
+    /// `place` uses one gap per region — so the 8 is carried by `cpuReadoutInset` itself (and by
+    /// `standInCapsuleMinWidth`, where the block's own gaps are `groupGap`s).
+    static let cpuGap: CGFloat = 8
+
+    /// The gate for the readout, read from `UserDefaults` — the same key, and the same default
+    /// (**on**), as `AppDelegate` (the menu) and `SessionMonitor` (the sampling). The view needs its
+    /// own copy because it sizes the flank the readout sits in, and it has to do that without being
+    /// told: `flankWidth` is a launch-geometry constant.
+    static var cpuEnabled: Bool {
+        (UserDefaults.standard.object(forKey: "ocbar.serviceCPU") as? Bool) ?? true
+    }
+
+    /// Width the readout is **provisioned** at: `CPU · ` plus three digits (`CPU · 999%`, 62.737pt at
+    /// 9.5pt medium), not the `CPU · 16%` a reading usually shows. This is the one number that may not
+    /// be optimistic — `place` zeroes the gap first, then clamps the block's leading edge (moving the
+    /// ring, the left flank's only landmark) and `masksToBounds` trims the rest, so a two-digit
+    /// provision would draw `CPU · 100%` as `CPU · 10`. It is a fixed width, not the label's own, so
+    /// the flank does not move when the value does.
+    static var cpuReadoutWidth: CGFloat { IslandCPUView.widestWidth }
+
+    /// What the readout costs the flank when its gate is on: the gap plus the provisioned width.
+    /// Zero when off, so `requiredLeftFlankWidth` is 43 and `leftContentInset` 47 again — the pill's
+    /// geometry before the readout existed, to the point.
+    private static var serviceCPUWidth: CGFloat { cpuEnabled ? cpuGap + cpuReadoutWidth : 0 }
+
+    /// Where the readout starts inside the left flank: `leftContentInset` + the ring + `groupGap` +
+    /// the two-digit count + `cpuGap` — 11 + 12 + 6 + 18.565 + 8 = 55.565 → **56**. 0 when the gate
+    /// is off (nothing is placed there).
+    ///
+    /// It is a **second pinned inset**, not a third element in the ring+count block: the readout is
+    /// always present while the feature is on, so it is a landmark in its own right, and hitching it
+    /// to the count's block would slide it 18.57pt every time a session started or stopped.
+    static var cpuReadoutInset: CGFloat {
+        guard cpuEnabled else { return 0 }
+        return (leftContentInset + IslandRing.diameterCap + groupGap + twoDigitCountWidth + cpuGap).rounded()
     }
 
     /// Least width the right flank needs: one two-digit badge per state it holds, the full
@@ -2175,17 +2241,20 @@ private final class CollapsedContentView: NSView {
         return (slots * twoDigitBadgeWidth + (slots - 1) * groupGap + 2 * minFlankClearance + flankMargin).rounded(.up)
     }()
 
-    /// Least width the left flank needs: the running ring, the gap, and that slot's two-digit count,
-    /// with the clearance on both sides — the same formula as the right flank's, over what this side holds.
-    /// 12 + 6 + 18.565 = 36.565 of content, so it rounds up to **43**.
+    /// Least width the left flank needs: the running ring, the gap, that slot's two-digit count and the
+    /// CPU readout with its gap, with the clearance on both sides — the same formula as the right
+    /// flank's, over what this side holds.
+    /// 12 + 6 + 18.565 + 8 + 62.737 = 107.301 of content, so it rounds up to **114** (43 without the
+    /// readout).
     ///
-    /// It is far below the right flank's 130, which is the point: the pill's wings stay the same width
-    /// (`islandFlank` is the wider of the two, and the right's 130 still binds), so this number only sets
-    /// where the pair sits inside the wing. What it *must* not do is overrun: `place` trims an overrun at
+    /// It is still below the right flank's 130, which is what keeps the wings unchanged: the pill's
+    /// wings stay the same width (`islandFlank` is the wider of the two, and the right's 130 still
+    /// binds), so this number only sets where the content sits inside the wing. It closes on that
+    /// ceiling as the left flank gains elements — 114 leaves **16** before it would bind, and that is
+    /// the number to watch before adding another one here. What it *must* not do is overrun: `place` trims an overrun at
     /// the capsule edge silently, and a two-digit count that got trimmed would be a wrong fact.
     static let requiredLeftFlankWidth: CGFloat = {
-        (IslandRing.diameterCap + groupGap + twoDigitCountWidth
-            + 2 * minFlankClearance + flankMargin).rounded(.up)
+        (leftContentWidth + 2 * minFlankClearance + flankMargin).rounded(.up)
     }()
 
     /// Width of a two-digit count at the font the counts are drawn with — the running slot's whole badge,
@@ -2217,6 +2286,18 @@ private final class CollapsedContentView: NSView {
         }
     }
 
+    /// The OpenCode server's own CPU as a **whole percentage**; nil = unknown (its gate is off, or
+    /// this tick had no honest reading). Unknown means the element draws nothing *and* costs nothing,
+    /// which is why it is a `didSet` of its own rather than a fifth badge: the count's dictionary and
+    /// the server's CPU are two different facts about two different things.
+    var cpu: Int? {
+        didSet {
+            guard cpu != oldValue else { return }
+            applyCPU()
+            needsLayout = true
+        }
+    }
+
     /// Whether the island is on screen, forwarded to the left flank's mark: nothing
     /// the pill *draws* depends on it, but the mark must not turn where nobody can
     /// see it (see `IslandActivityView`).
@@ -2240,12 +2321,18 @@ private final class CollapsedContentView: NSView {
     private let groups: [SessionStatus: IslandMarkerGroup] = Dictionary(
         uniqueKeysWithValues: CollapsedContentView.badgeStatuses.map { ($0, IslandMarkerGroup(frame: .zero)) }
     )
+    /// The server's CPU, in the left flank past the running count. Always present while its gate is
+    /// on — like the ring, and for the same reason: an element that comes and goes drags everything
+    /// beside it.
+    private let cpuReadout = IslandCPUView(frame: .zero)
 
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         addSubview(activity)
+        cpuReadout.isHidden = true
+        addSubview(cpuReadout)
         for status in Self.badgeStatuses {
             guard let group = groups[status] else { continue }
             group.isHidden = true
@@ -2281,6 +2368,17 @@ private final class CollapsedContentView: NSView {
             }
             show(status, count: count, in: group)
         }
+    }
+
+    /// Push the server's CPU into the readout, and nothing else.
+    ///
+    /// **It must never touch `activity.running`.** The ring answers "is a session running", which is
+    /// `counts[.busy] > 0` and only that: a server at 80% with every session idle is a busy process,
+    /// not a session that is working, and a readout that turned the mark orange would make the pill's
+    /// one running statement say two things.
+    private func applyCPU() {
+        cpuReadout.value = cpu
+        cpuReadout.isHidden = cpu == nil
     }
 
     /// Point one badge at a status and a count. The design that failed here wrote
@@ -2352,8 +2450,15 @@ private final class CollapsedContentView: NSView {
             // would drag the landmark 21.5pt sideways every time a session started or stopped.
             var leftItems: [IslandFlankElement] = [activity]
             leftItems.append(contentsOf: leftBadges)
-            place(leftItems, in: NSRect(x: 0, y: 0, width: cutoutStart, height: bounds.height),
+            let leftRegion = NSRect(x: 0, y: 0, width: cutoutStart, height: bounds.height)
+            place(leftItems, in: leftRegion,
                   alignment: .pinned(inset: Self.leftContentInset))
+            // The readout is its **own** pinned element, not a third item in the block above, and it
+            // is placed whether or not there is a reading: its inset is fixed, so a tick with no
+            // honest sample (or no count beside it) changes nothing that is drawn. Two pinned insets
+            // because the left flank has two always-present elements, and the readout must not
+            // inherit the count's reflow — the count comes and goes, this does not.
+            place([cpuReadout], in: leftRegion, alignment: .pinned(inset: Self.cpuReadoutInset))
             if !rightBadges.isEmpty {
                 // Right flank: **centred** — it holds a tally whose badges are peers, with
                 // no always-present element whose position is a landmark.
@@ -2366,6 +2471,10 @@ private final class CollapsedContentView: NSView {
             var items: [IslandFlankElement] = [activity]
             items.append(contentsOf: leftBadges)
             items.append(contentsOf: rightBadges)
+            // Last, after the running count, and only while its gate is on: with the gate off the
+            // block has to be exactly what it was — a zero-width element would still cost this
+            // region one `groupGap`.
+            if Self.cpuEnabled { items.append(cpuReadout) }
             place(items, in: bounds)
         }
     }
@@ -2614,6 +2723,141 @@ private final class IslandMarkerGroup: NSView, IslandFlankElement {
         // made the old dot read as a legend-less status light — that mark is now the ring beside the count,
         // so a legend-less digit is exactly what this slot should look like.
         glyphView.isHidden = marker == nil
+        needsLayout = true
+    }
+}
+
+// MARK: - The server's CPU
+
+/// The OpenCode **server** process's CPU, in the collapsed pill's left flank, labelled —
+/// **`CPU · 16%`**.
+///
+/// **The prefix ships.** The flank also carries the running count, and an unlabelled `16%` beside
+/// it asked the reader to guess which number was the sessions and which the process; the earlier
+/// version left `CPU` out on the grounds that it is 18.8pt of ink to label a 24.8pt value, and the
+/// maintainer rejected that trade — a readout nobody can name is not a readout. So the label is
+/// spent, `CPU` is capitals, and the separator is `·`
+/// (U+00B7 middle dot) rather than a dash: one space either side, and nothing that could read as a
+/// minus sign against a percentage.
+///
+/// It stays **one run, one tint** — no dimmer prefix. Two tones in a 9.5pt string that never exceeds
+/// 62.7pt would cost a second attributed run and buy a contrast the eye cannot resolve at this
+/// size; the prefix is part of the reading, not a caption for it.
+///
+/// The `%` is still not optional, and for the same reason it always was: the pill already carries
+/// bare counts to the left of this, so a trailing `16` with no sign would be a third count. The
+/// `%` is what says the number is a measurement.
+///
+/// No glyph, and never a tint from the pill's status colours: one mark per flank is the ring, and
+/// colour on this flank belongs to statuses.
+///
+/// **It never drives the ring.** High CPU is not a running session — see
+/// `CollapsedContentView.applyCPU()`.
+///
+/// Only the `service.json` pid is sampled, so CPU spent in the server's own tool subprocesses
+/// (`bash`, `git`, a test run) is **not** counted here.
+private final class IslandCPUView: NSView, IslandFlankElement {
+
+    /// 9.5pt, medium, tabular: smaller than the 11pt counts because it is a detail *about* them rather
+    /// than a peer, and monospaced digits so it cannot jitter as the value changes.
+    static let font = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .medium)
+
+    /// The percentage at which the readout stops being quiet. Not a status colour: this is a readout,
+    /// and the pill's colours belong to statuses (and the ring) — anything other than plain white here
+    /// would be a third vocabulary. So "attention" is white at its normal weight (α0.92) instead of
+    /// the quiet α0.50.
+    static let attentionThreshold = 50
+
+    /// How still the number is held, in whole percent: the shown integer only moves when the target is
+    /// at least this far from it. The smoothed value is already an EMA, but a point or two of drift
+    /// would still rewrite the text every few ticks, which reads as a glitch rather than a measurement.
+    private static let deadband = 3
+
+    /// The widest the readout can be: `CPU · ` plus **three digits**, the value the flank is
+    /// provisioned for (`CollapsedContentView.cpuReadoutWidth`). Measured through
+    /// `islandLabelWidth`, so the digits cannot be shaved and the geometry cannot drift from what
+    /// is drawn. The prefix is in here because it is drawn: it is part of the string, not a label
+    /// the layout may clip out of the provision.
+    static let widestWidth: CGFloat = {
+        let label = NSTextField(labelWithString: "CPU · 999%")
+        label.font = font
+        return islandLabelWidth(for: label)
+    }()
+
+    /// How far the label is raised above the box's centre, in points. A 9pt cap band sits 0.2709pt
+    /// lower than an 11pt one, and that delta is linear in the size gap: at 9.5pt it is
+    /// 0.2709 × 0.75 = 0.2032. (Measured the same way at both sizes — the label's frame-centred
+    /// cap-band centre against the 11pt counts': 0.0513 at 9pt, 0.0385 at 9.5pt, the same 0.75.)
+    /// The eye reads 0.19. Same class of correction as `IslandActivityView.pillMarkDrop` (0.5), opposite sign.
+    private static let labelRaise: CGFloat = 0.1875
+
+    /// The percentage the caller published, as a whole number; nil = unknown.
+    var value: Int? {
+        didSet {
+            guard value != oldValue else { return }
+            updateShown()
+        }
+    }
+
+    /// The integer actually drawn — the one the deadband holds still, and the one the colour is
+    /// decided from, so the text and its tint can never be about different numbers.
+    private var shown: Int? {
+        didSet {
+            guard shown != oldValue else { return }
+            applyShown()
+        }
+    }
+
+    private let label = NSTextField(labelWithString: "")
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        label.font = Self.font
+        label.textColor = NSColor.white.withAlphaComponent(0.50)
+        label.isHidden = true
+        addSubview(label)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    /// The label's ink width, and **0 while unknown** — nothing is drawn then, so the element must not
+    /// cost the flank anything either. Never the provisioned width: this is the element answering for
+    /// what it draws, and the *provision* lives in `CollapsedContentView.cpuReadoutWidth`.
+    func flankWidth(atHeight height: CGFloat) -> CGFloat {
+        shown == nil ? 0 : islandLabelWidth(for: label)
+    }
+
+    override func layout() {
+        super.layout()
+        let size = label.intrinsicContentSize
+        label.frame = NSRect(
+            x: 0,
+            y: (bounds.height - size.height) / 2 - Self.labelRaise,
+            width: islandLabelWidth(for: label),
+            height: size.height
+        )
+    }
+
+    private func updateShown() {
+        guard let target = value else {
+            shown = nil
+            return
+        }
+        // Three digits is the whole vocabulary: a pid reuse or a bogus delta can produce a number that
+        // would draw wider than the flank is provisioned for, and that width would be trimmed.
+        let capped = min(target, 999)
+        if let current = shown, abs(capped - current) < Self.deadband { return }
+        shown = capped
+    }
+
+    private func applyShown() {
+        label.stringValue = shown.map { "CPU · \($0)%" } ?? ""
+        label.isHidden = shown == nil
+        label.textColor = NSColor.white.withAlphaComponent((shown ?? 0) >= Self.attentionThreshold ? 0.92 : 0.50)
         needsLayout = true
     }
 }
@@ -4304,10 +4548,11 @@ final class IslandHost {
 
     /// Push the same rows to every screen's island. Any capping happens inside
     /// each panel, against its own screen's budget.
-    func update(rows: [IslandRow], enabled: Bool) {
+    func update(rows: [IslandRow], enabled: Bool, serviceCPU: Double?) {
         lastRows = rows
         lastEnabled = enabled
-        for panel in panels { panel.update(rows: rows, enabled: enabled) }
+        lastServiceCPU = serviceCPU
+        for panel in panels { panel.update(rows: rows, enabled: enabled, serviceCPU: serviceCPU) }
     }
 
     /// Collapse every island — the menubar calls this as its menu opens, so no island anywhere sits in
@@ -4395,6 +4640,7 @@ final class IslandHost {
     private var panels: [IslandPanel] = []
     private var lastRows: [IslandRow] = []
     private var lastEnabled = false
+    private var lastServiceCPU: Double?
     private var observer: NSObjectProtocol?
 
     private func screensDidChange() {
@@ -4419,6 +4665,6 @@ final class IslandHost {
             return panel
         }
         // Re-apply the current state so a rebuild does not blank the islands.
-        for panel in panels { panel.update(rows: lastRows, enabled: lastEnabled) }
+        for panel in panels { panel.update(rows: lastRows, enabled: lastEnabled, serviceCPU: lastServiceCPU) }
     }
 }
