@@ -1374,18 +1374,29 @@ final class IslandPanel {
     /// The card must never be bare padding: with the menubar item hidden the island is the app's only
     /// surface, so an empty ocbar has to say *why* the card is empty rather than draw an empty box under a
     /// gear. It is one `rowHeight` tall and the card's height comes from that same number
-    /// (`IslandCardView.emptyStateHeight`), so this is content like any other row — created, removed and
-    /// alpha-synced by the same path — and never a special case in the frame.
-    private func rebuildEmptyState(in card: IslandCardView) {
+    /// (`IslandCardView.emptyStateHeight`), so this is content like any other row — created and removed by
+    /// this one path, alpha-synced like a row's — and never a special case in the frame.
+    ///
+    /// Called from `rebuildRows` and from `refoldCard` (which runs it on every fold, ahead of the row
+    /// signature). **Reports whether the card's content changed**, because the line is not a row: it can
+    /// arrive on a fold the row signature calls a no-op, and the open card still has to be resized for it.
+    @discardableResult
+    private func rebuildEmptyState(in card: IslandCardView) -> Bool {
         guard visibleRows.isEmpty else {
+            guard card.emptyStateView != nil else { return false }
             card.emptyStateView?.removeFromSuperview()
             card.emptyStateView = nil
-            return
+            return true
         }
-        guard card.emptyStateView == nil else { return }
+        guard card.emptyStateView == nil else { return false }
         let view = IslandEmptyStateView(frame: .zero)
+        // The alpha is set on creation, not left to `rebuildRows`: this can be created on a fold that path
+        // does not run, and a folded card keeps its content views at alpha 0 (see `applyAppearance`) — an
+        // unsynced line would draw inside the collapsed pill.
+        view.alphaValue = expandedState ? 1 : 0
         card.addSubview(view)
         card.emptyStateView = view
+        return true
     }
 
     /// The collapsed pill's readouts, as one dictionary: how many sessions are in
@@ -1781,11 +1792,24 @@ final class IslandPanel {
     /// poll would leave a stale card on screen. An unchanged signature is a no-op, which is what keeps a
     /// re-arm on the *same* row from rebuilding anything: that case is the mark's, and the mark is re-applied
     /// by the caller either way.
+    ///
+    /// **The empty line is reconciled before the signature and outside it**, because the signature signs the
+    /// *rows* and this line is exactly what a card with no rows has instead of them. Left inside it, a card
+    /// born with no rows never gets one: `rebuildRows` is the only caller of `rebuildEmptyState` and it sits
+    /// behind the signature guard, while the empty signature (`"0\u{2}"`) is stable and has usually been
+    /// recorded already — that is the ordinary launch: `IslandHost.rebuild` runs from `init` and pushes
+    /// `enabled: false` (its `lastEnabled` initial value) into the fresh panels, whose `hide()` → `refoldCard`
+    /// records the empty signature **with no card in existence** (`rebuildRows` returns on its own `guard let
+    /// card`), and the first tick that does have a card computes the same signature and is told nothing
+    /// changed. Its arrival is content changing — it moves the height — so it is reported like a row change.
+    /// Cost on a fold that needs nothing: one guard over an empty row list and one nil check.
     @discardableResult
     private func refoldCard() -> Bool {
         recomputeFold(metrics: currentMetrics())
+        var emptyChanged = false
+        if let card { emptyChanged = rebuildEmptyState(in: card) }
         let signature = Self.signature(for: visibleRows, folded: foldedCount)
-        guard signature != lastSignature else { return false }
+        guard signature != lastSignature else { return emptyChanged }
         lastSignature = signature
         rebuildRows()
         return true
@@ -1917,11 +1941,16 @@ private final class IslandCardView: NSView {
     /// Height the card needs for the content it currently holds. The panel sizes
     /// the window from this and `layout()` positions the very same views with the
     /// same heights, so the two can never disagree — one source of truth for the
-    /// expanded height. With no rows at all it is the empty-state line's height,
-    /// which is one row's.
+    /// expanded height. With no rows, that is the empty-state line **if the card
+    /// has one**.
     var contentHeight: CGFloat {
-        let rowTotal = rowViews.isEmpty ? emptyStateHeight : rowViews.reduce(0) { $0 + height(of: $1) }
-        var total = contentTop + rowTotal
+        var total = contentTop + rowViews.reduce(0) { $0 + height(of: $1) }
+        // The line is counted only when it is on the card — `emptyStateView != nil`, the same predicate
+        // `layout()` places it under — and not merely when the row list is empty. Those two diverge for as
+        // long as a card can exist without its line, and counting a line `layout()` will not place is the
+        // whole bug: it budgeted `emptyStateHeight` here while `layout()` left `y` alone, so `footerY`
+        // landed one row above the card's bottom edge and the gear floated there over an empty gap.
+        if rowViews.isEmpty, emptyStateView != nil { total += emptyStateHeight }
         if summaryView != nil { total += summaryRowHeight }
         total += actionRowHeight
         return total + bottomPadding
