@@ -9,12 +9,12 @@ macOS menubar app that monitors [OpenCode](https://opencode.ai) sessions across 
 
 ## Features
 
-- **Menubar label** — one colored status icon plus project folder name per session, up to a configurable maximum. Overflow folds into a single `✓ n idle`.
+- **Menubar label** — one colored status icon plus project folder name per session, up to a configurable maximum. Overflow folds into a single `✓ n idle`. **With the island on, the menubar item is hidden outright** — the island replaces it rather than decorating it.
 - **Icon color** — orange while all sessions are busy, green when at least one is idle, red if any errored, gray when OpenCode isn't running.
-- **Click** for a per-session menu with status, optional age and titles.
+- **Click** for a per-session menu with status, optional age and titles — from the menubar icon, or from the gear in the expanded island card when there is no icon.
 - **Context usage** (off by default) — how full each session's context window is, with configurable format and warning thresholds.
 - **Notification and bubble** — firing on busy → idle or → waiting. The bubble shows the project and status, holds 10s, and jumps to that session's tmux pane on click.
-- **Island** (on by default) — a status capsule at the top of every display: a ring and running count on the left, one icon-and-count badge per waiting/finished/errored state on the right. Hover to expand into a session list you can click. With the bubble off, it takes over as the reminder.
+- **Island** (on by default) — a status capsule at the top of every display: a ring and running count on the left, one icon-and-count badge per waiting/finished/errored state on the right. Hover to expand into a session list you can click; the card's footer gear drops the menu. It stays up with no sessions (`No OpenCode sessions`), because with the menubar item hidden it is ocbar's only surface. With the bubble off, it takes over as the reminder.
 
 Alert sound, bubble position, and per-surface toggles live in the menu.
 

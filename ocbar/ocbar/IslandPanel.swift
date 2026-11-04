@@ -188,8 +188,8 @@ private let islandHoverWashDY: CGFloat = 2
 private let islandHoverWashRadius: CGFloat = 7
 private let islandHoverWashAlpha: CGFloat = 0.09
 
-/// The alert's action-row button, `Hide`: a quiet way out, trailing, on a row under the card's content,
-/// hiding the card without acting on the session. What it is drawn with, in this card's own terms:
+/// The alert's footer button, `Hide`: a quiet way out, in the card's permanent footer row, **left of the
+/// gear**, hiding the card without acting on the session. What it is drawn with, in this card's own terms:
 ///
 ///  - **type** is the card's subordinate size (`islandCardSecondaryFontSize`, 11) at regular weight —
 ///    the size the age, the context line and the `+k more` footnote are drawn at, and regular because
@@ -200,9 +200,9 @@ private let islandHoverWashAlpha: CGFloat = 0.09
 ///  - **ground** at rest is `islandActionButtonRestingFillAlpha`, derived below;
 ///  - **hover** is the card's wash itself (`islandHoverWash…`): the same fill and geometry a session row
 ///    takes under the pointer, in the file's own micro duration;
-///  - **height** is not the button's at all: the action row is a row of the card, laid out at the card's
-///    own short-row height `summaryRowHeight` (the `+k more` footnote's 24), so a control row and the
-///    fold's row sit on the same line of the card's rhythm;
+///  - **height** is not the button's at all: it is laid out at the card's own short-row height
+///    `summaryRowHeight` (the `+k more` footnote's 24) — the height of the footer it shares with the gear,
+///    so a control row and the fold's row sit on the same line of the card's rhythm;
 ///  - **no pressed state, no border, no scale, no material, and no colour vocabulary**: a green/red/blue
 ///    palette ranks a decision against its alternatives, and this button is not a decision.
 ///
@@ -213,8 +213,8 @@ private let islandHoverWashAlpha: CGFloat = 0.09
 /// and type-only, so a control with no ground reads as one more line of text rather than as something to
 /// press; and the competition argument is really about *brightness*, which a ceiling handles better than
 /// abstention does. The purity given up is real —
-/// every other element on this card is text or a status glyph, and this is now the only shape that
-/// exists in order to be clicked — and it buys the one thing type alone could not say.
+/// every other element on this card is text or a status glyph, and this is now one of two shapes that
+/// exist in order to be clicked — and it buys the one thing type alone could not say.
 let islandActionButtonLabel = "Hide"
 /// The tooltip, and the second half of it is what this card actually does: hiding leaves the card with
 /// one way back, which is hovering the island again.
@@ -236,6 +236,36 @@ private let islandActionButtonForegroundAlpha: CGFloat = 0.55
 private let islandActionButtonHoverForegroundAlpha: CGFloat = 0.7
 /// The file's own micro duration — the one `present()`'s fade-in uses — on the file's own curve.
 private let islandActionButtonHoverDuration: TimeInterval = 0.15
+
+/// The card's footer gear: the way into the dropdown menu while the menubar item is hidden, and the one
+/// control on **every** card, alert or not. It never moves — `IslandCardView.layout` measures its trailing
+/// edge from the card's trailing inset — so an alert's `Hide` arriving beside it reflows nothing to its right
+/// and the gear is in the same place on both cards.
+///
+/// **Every tone is `Hide`'s, borrowed rather than re-derived**: same footer row, same wash
+/// (`islandHoverWash…`), same resting ground (`islandActionButtonRestingFillAlpha`), same two alphas
+/// (`islandActionButtonForegroundAlpha` → `…HoverForegroundAlpha`), same micro duration. A second quiet
+/// control with a ladder of its own is exactly how a card ends up with two kinds of quiet. What is its own is
+/// only what a glyph needs and a label does not: the symbol and its size.
+let islandSettingsSymbolName = "gearshape.fill"
+/// **12pt, one step above the card's subordinate 11.** The footer's type is 11, but a hollow SF Symbol drawn
+/// at its text's point size reads smaller than the text beside it — the same reason a card row's 12.5pt name
+/// takes a 13pt glyph. At 12, `gearshape.fill` measures a **15 × 15pt box around 13.0pt of ink**, and a session
+/// row's disc draws 13.125 — so the gear is the same apparent size as the marks on the rows above it, which is
+/// the one size this card's marks agree on.
+private let islandSettingsGlyphPointSize: CGFloat = 12
+/// Medium, not the row glyphs' semibold: this is footer-tier chrome beside an α0.55 label, and the heavier
+/// weight would make the card's least important control its brightest mark.
+private let islandSettingsGlyphWeight: NSFont.Weight = .medium
+/// What the gear is, for VoiceOver. It carries no tooltip: its shape is the whole label. `Hide` needs one
+/// because a bare word cannot say what pressing it does; a gear cannot say anything else.
+let islandSettingsAccessibilityLabel = "Settings"
+
+/// The card's one line when it has **nothing to list**. These are the dropdown's own words for the same
+/// situation (`AppDelegate`'s menu, which adds `No OpenCode sessions` when no session qualifies), repeated
+/// here rather than hoisted into a shared constant: the island's card and the dropdown are the app's two ways
+/// to read the session list, and an empty ocbar has to say the same thing on both. Reword them together.
+let islandEmptyStateText = "No OpenCode sessions"
 
 // A row stacks up to three lines, always in this order:
 //
@@ -391,10 +421,11 @@ struct IslandListBudget {
     let contentTop: CGFloat
     let bottomPadding: CGFloat
     let summaryRowHeight: CGFloat
-    /// Height of the alert's action row when the card is carrying one (0 when it is not). New chrome,
-    /// so it comes off the list budget exactly as `summaryRowHeight` does: a card with a `Hide` button
-    /// has one row's worth less room than the same card without it, and the button can never be pushed
-    /// past the bottom of the screen by a fold that was computed without it.
+    /// Height of the card's footer row — `summaryRowHeight`, because the gear makes it permanent. Chrome
+    /// like the folded summary, so it comes off the list budget the same way: a card always owes one row's
+    /// worth to its footer, and the gear (or an alert's `Hide` beside it) can never be pushed past the
+    /// bottom of the screen by a fold that was computed without it. It used to be 0 on a card with no
+    /// `Hide` button; that case is gone, and the budget now pays it always.
     let actionRowHeight: CGFloat
     /// Tallest row in the list, so the budget can always hold one.
     let tallestRowHeight: CGFloat
@@ -405,12 +436,12 @@ struct IslandListBudget {
     ///  - a share of the screen's usable height, so the card never takes over
     ///    the display even where there is room for it, and
     ///  - the distance from the top edge to the bottom of the usable area, less
-    ///    the chrome, the summary row and the action row. The card hangs from the
+    ///    the chrome, the summary row and the footer. The card hangs from the
     ///    very top, so this is the term that stops it running past the bottom of
     ///    any screen or over the Dock.
-    /// The summary's and the action row's heights come out of that *ceiling* but
-    /// never out of the budget itself, so neither folding a list nor an alert's
-    /// `Hide` button ever costs a visible session row.
+    /// The summary's and the footer's heights come out of that *ceiling* but never
+    /// out of the budget itself, so neither folding a list nor the footer's
+    /// controls ever costs a visible session row.
     var rowBudget: CGFloat {
         let soft = visibleFrame.height * fraction
         let hard = screenFrame.maxY - visibleFrame.minY - contentTop - bottomPadding - summaryRowHeight - actionRowHeight
@@ -518,6 +549,12 @@ func setIslandHoverDelay(milliseconds: Int) {
 /// and, while an alert is armed, listing **only the session that just moved**, with the
 /// rest folded into the card's `+k more` footnote (`recomputeFold`).
 ///
+/// **With the menubar item hidden this is the app's only surface**, which is why it no longer waits for a
+/// session to exist: `enabled` alone keeps the panel up (`update`), and a zero-session island is a pill
+/// with no counts (a dim, still ring and no badges) over a card whose one line says
+/// `No OpenCode sessions`. With both surfaces gated on a session, an empty ocbar would have had no
+/// settings and no Quit.
+///
 /// One instance belongs to one `NSScreen`; `IslandHost` owns the set of them.
 ///
 /// Everything is drawn black-and-white regardless of the system appearance,
@@ -549,6 +586,16 @@ final class IslandPanel {
     /// screen, and hiding it on one screen has to hide it on all of them.
     var onHideRequested: (@MainActor () -> Void)?
 
+    /// Fired when the card's footer gear is clicked: the way into the dropdown menu while the menubar item
+    /// is hidden. Answered by the app delegate, which owns the one `NSMenu` — the island does not know what
+    /// the menu holds.
+    ///
+    /// **Panel-local on purpose**, unlike the two callbacks above: the menu is one object for the app, not
+    /// one per screen, so there is nothing to fan out and the host is a pure pass-through
+    /// (`IslandHost.onSettingsRequested`). Nothing is collapsed here either — opening the menu collapses
+    /// every island itself (`NSMenuDelegate.menuWillOpen`), so a fold on this path would only do it twice.
+    var onSettingsRequested: (@MainActor () -> Void)?
+
     /// Whether the card is currently in its expanded state.
     var isExpanded: Bool { expandedState }
 
@@ -565,15 +612,21 @@ final class IslandPanel {
     /// Push the current rows. Idempotent: identical content never restarts a
     /// transition nor resets hover state, so it is safe to call on every poll
     /// tick (~0.5s).
+    ///
+    /// **`enabled` alone keeps the island up; an empty list is a state, not an absence.** The menubar item
+    /// is hidden while the island is on, so ordering the panel out whenever there is nothing to list would
+    /// leave the app with no UI at all — the card's empty line says `No OpenCode sessions` and its footer
+    /// gear still reaches the menu. Only `!enabled` (and `retire()`, for a display that is gone) takes the
+    /// panel off screen.
     func update(rows newRows: [IslandRow], enabled: Bool) {
-        guard enabled, !newRows.isEmpty else {
+        guard enabled else {
             hide()
             return
         }
         ensurePanel()
-        // The alert's chrome is part of the card, so it is settled *before* the fold is worked out: the
-        // action row takes its height out of the same budget the rows are measured against, and a fold
-        // computed without it would put the button past the bottom of the screen.
+        // The alert's `Hide` button is part of the card, so it is settled *before* the fold is worked out:
+        // it shares the footer row with the gear, and the footer's height comes out of the same budget the
+        // rows are measured against.
         let actionRowChanged = syncActionRow()
 
         rows = newRows
@@ -592,16 +645,18 @@ final class IslandPanel {
 
         if !visible {
             present()
-            // An alert armed while the island was off screen — no rows to show,
-            // so no card for it to open — opens it now, on the first tick that
-            // gives it one.
-            if alertArmed {
-                setExpanded(true, animated: true, duration: alertExpandDuration)
-            }
         } else if contentChanged || actionRowChanged, expandedState {
-            // The card's height changed while it was open — the fold moved, or the alert's action row
-            // came or went — so it grows or shrinks downwards with its top edge anchored.
+            // The card's content changed while it was open — the fold moved, or every row went away and
+            // the empty line took their place — so it grows or shrinks downwards with its top edge
+            // anchored. `actionRowChanged` no longer moves the height (the footer is there either way), so
+            // that half is a no-op today: `resizeOpenCard` → `setFrame` returns early when the frame is
+            // already the target. It is kept because the `Hide` button's arrival is still a layout change
+            // inside the open card, and the fold usually moves on the same tick.
             resizeOpenCard()
+        }
+        // An alert armed before its row existed opens the card on the first tick that has one.
+        if alertArmed, !expandedState, !rows.isEmpty {
+            setExpanded(true, animated: true, duration: alertExpandDuration)
         }
     }
 
@@ -657,8 +712,10 @@ final class IslandPanel {
         // is what makes every pending deadline the alert's to keep or drop.
         cancelPending()
         armAlertTimer(seconds: seconds)
-        // The chrome first, then the rows: the action row is alert-only, and an alert landing on an
-        // already-open card has to grow that card rather than push a button past its bottom edge.
+        // The footer first, then the rows: `Hide` joins the permanent footer row while an alert is armed (and
+        // leaves it with the alert), so the card's chrome has to be settled before the fold is measured —
+        // and an alert landing on an already-open card has to lay that row out rather than push a button
+        // past its bottom edge.
         let chromeChanged = syncActionRow()
         // And the rows with it: the card is now about one session, so the list is re-derived here —
         // this is also what makes a re-arm on a *different* session swap the row, while a re-arm on
@@ -668,19 +725,21 @@ final class IslandPanel {
         // expansion is still fading in, so the two arrive together instead of one
         // after the other.
         applyAlertMark()
-        // Both changes move an open card's height — the chrome adds a row's worth, the scoped list
-        // takes it back — so one resize serves both, top edge anchored.
+        // The scoped list moves an open card's height (the footer's own 24 does not — it is always there),
+        // so this is one resize, top edge anchored, whenever either half changed. `chromeChanged` only ever
+        // re-lays the footer's contents out.
         if chromeChanged || contentChanged { resizeOpenCard() }
 
-        // Nothing on screen yet. The rows for this session arrive on the render
-        // tick that follows the transition, and the tail of `update` opens the
-        // card on the first tick that has one — so this arms and returns rather
-        // than waiting. A card that never arrives is not awaited forever either:
-        // the timer ends the alert regardless.
-        guard visible else { return }
-        // Already open because the pointer is on it. The mark, the action row, the narrowed list and the
-        // timer are then the whole alert: the frame has nowhere else to move, and replaying the open would
-        // restart the fade for no reason.
+        // Nothing on screen yet, **or nothing to put on it**. The rows for this session arrive on the
+        // render tick that follows the transition, so this arms and returns rather than waiting, and the
+        // tail of `update` opens the card on the first tick that has one. An empty list is that same case
+        // even on a visible island: an alert must never open a card about a session it cannot show, so it
+        // waits for its row exactly as an off-screen island does — and the timer ends it regardless if the
+        // row never comes.
+        guard visible, !rows.isEmpty else { return }
+        // Already open because the pointer is on it. The mark, the narrowed list and the timer are then the
+        // whole alert: the frame has nowhere else to move, and replaying the open would restart the fade for
+        // no reason.
         guard !expandedState else { return }
         setExpanded(true, animated: true, duration: alertExpandDuration)
     }
@@ -804,14 +863,17 @@ final class IslandPanel {
     private let hoverSlack: CGFloat = 6
     private let animationDuration: TimeInterval = 0.3
     private let rowInset: CGFloat = 8
+    /// The air the card keeps **below its last child**, which is the footer row — the same one step every
+    /// edge of the card uses.
+    ///
+    /// The bottom used to pay a *second* step — `bottomPaddingWithoutActionRow`, another 8 — on every card
+    /// with no `Hide` button under its last row, because there the last session row sat 8 above a bottom
+    /// edge rounded up to 18 while the top edge paid two steps (the cutout — or `rowInset` — plus
+    /// `islandExpandedTopPadding`), so the card read heavy at the top and pinched at the bottom. **That
+    /// step is gone with the footer**: every card now holds a row between its last session row and the
+    /// edge, which is the argument the alert's card always made, so the bottom is one step for every card
+    /// and the conditional made the same number with a name for a case that no longer exists.
     private let bottomPadding: CGFloat = 8
-    /// Extra bottom air the card pays **only when it has no action row**. The hover card's last session
-    /// row otherwise sits `bottomPadding` (8) above a bottom edge rounded up to 18, while the top edge
-    /// pays two steps (the cutout — or `rowInset` — plus `islandExpandedTopPadding`), so the card read
-    /// heavy at the top and pinched at the bottom. The alert's card needs none of it: the `Hide` row
-    /// already stands between the last session row and the edge, which is why this is a *conditional*
-    /// step and not a bigger `bottomPadding`.
-    private let bottomPaddingWithoutActionRow: CGFloat = 8
     private let expandedCornerRadius: CGFloat = 18
     /// Fake-notch capsule width for a display with no cutout. The rule is `islandStandInCapsuleWidth`
     /// — a share of the screen's width, floored and capped so it stays a pill, and floored again by
@@ -967,16 +1029,16 @@ final class IslandPanel {
         (metrics.notched ? metrics.topInset : rowInset) + islandExpandedTopPadding
     }
 
-    /// The expanded card sizes itself from the content it actually holds — rows
-    /// plus the folded summary — and `IslandCardView.layout()` positions those
-    /// same views, so the window frame and the layout can never disagree. Its
-    /// width is the derived target, bounded by the target screen.
+    /// The expanded card sizes itself from the content it actually holds — rows (or the one line that
+    /// stands in for them when there are none), plus the folded summary, plus the footer — and
+    /// `IslandCardView.layout()` positions those same views, so the window frame and the layout can never
+    /// disagree. Its width is the derived target, bounded by the target screen.
     private func frame(expanded: Bool, metrics: ScreenMetrics) -> NSRect {
         let collapsed = collapsedSize(metrics: metrics)
         let size: NSSize
         if expanded {
             let height = card?.contentHeight
-                ?? (contentTop(for: metrics) + islandRowOneLineHeight + cardBottomPadding)
+                ?? (contentTop(for: metrics) + islandRowOneLineHeight + actionRowHeight + bottomPadding)
             size = NSSize(width: expandedCardWidth(collapsedWidth: collapsed.width, metrics: metrics), height: height)
         } else {
             size = collapsed
@@ -1061,18 +1123,25 @@ final class IslandPanel {
         card.onClick = { [weak self] in
             guard let self else { return }
             // **An armed alert is not folded by a blank click.** Everything that reaches this closure is
-            // "not a session row, not the `Hide` button" — the card's margins, and the inert `+k more`
-            // footnote, which this same path claims because `hitTest` deliberately lets the summary fall
-            // through. On a hover card that is the way out (the pointer is on the card because the user put
-            // it there), but an unprompted card has one way out and it is visible: `Hide`. Folding on a
-            // stray click would end the reminder silently — `setExpanded(false)` neither latches the hover
-            // open off nor ends the alert, so the card would sit armed and unseen, or, if the pointer
+            // "not a session row and not a footer control" — the card's margins, and the inert `+k more`
+            // footnote and empty-state line, which this same path claims because `hitTest` deliberately lets
+            // both fall through. On a hover card that is the way out (the pointer is on the card because the
+            // user put it there), but an unprompted card has one way out and it is visible: `Hide`. Folding
+            // on a stray click would end the reminder silently — `setExpanded(false)` neither latches the
+            // hover open off nor ends the alert, so the card would sit armed and unseen, or, if the pointer
             // happened to stay inside the collapsed hover rect, pop back 0.35s later off the 0.15s poll:
             // one click, two outcomes. It is made no click at all. Clicking a *collapsed* card to open it
             // still works — while an alert is armed only `collapse()` folds the card, and that ends the
             // alert, so this guard only ever refuses the fold.
             guard !(self.alertArmed && self.expandedState) else { return }
             self.setExpanded(!self.expandedState, animated: true)
+        }
+        // The footer's gear — the one control on every card, alert or not. Answered one layer up, by the
+        // app delegate, which owns the single menu; **nothing is folded here**, because the menu being about
+        // to open collapses every island itself (`NSMenuDelegate.menuWillOpen`), and a fold on this path
+        // would only do it twice.
+        card.settingsButton.onActivate = { [weak self] in
+            self?.onSettingsRequested?()
         }
 
         let collapsed = CollapsedContentView(frame: card.bounds)
@@ -1112,8 +1181,8 @@ final class IslandPanel {
     /// because the session is filtered out or unbound — the card falls back to the **whole ranked list,
     /// exactly as a hover card shows it**, and marks nothing. That is the one rule this may not break: a
     /// card that opened must never open empty, and an alert with nowhere to point is still a card the user
-    /// has to be told about. A card armed while the island is off screen lands here with no rows at all and
-    /// scopes on the first tick that has the row (`update`).
+    /// has to be told about. A card armed while the island is off screen — or while there is nothing to list at
+    /// all — lands here with no rows and scopes on the first tick that has the row (`update`).
     private func recomputeFold(metrics: ScreenMetrics) {
         let ranked = Self.attentionRanked(rows)
         // The rows this card is allowed to list, and the sessions already folded away before the budget is
@@ -1150,7 +1219,7 @@ final class IslandPanel {
             screenFrame: metrics.screen.frame,
             visibleFrame: metrics.screen.visibleFrame,
             contentTop: contentTop(for: metrics),
-            bottomPadding: cardBottomPadding,
+            bottomPadding: bottomPadding,
             summaryRowHeight: summaryRowHeight,
             actionRowHeight: actionRowHeight,
             tallestRowHeight: tallestRowHeight,
@@ -1158,27 +1227,24 @@ final class IslandPanel {
         )
     }
 
-    /// Height of the card's action row: the card's own short-row height, `summaryRowHeight` — the same
-    /// 24 the folded `+k more` row uses — while an alert is armed, and nothing otherwise. The action row
-    /// is a row *of this card*, so it takes the card's rhythm rather than a height of its own, and the
-    /// panel's copy and the card's (`IslandCardView.actionRowHeight`) come from that one number.
-    private var actionRowHeight: CGFloat { alertArmed ? summaryRowHeight : 0 }
+    /// Height of the card's footer row: the card's own short-row height, `summaryRowHeight` — the same 24
+    /// the folded `+k more` row uses — and now **always**, because the footer is always there. It carries
+    /// the settings gear on every card and `Hide` joins it only while an alert is armed, so the row is
+    /// chrome every budget pays rather than a row an alert adds. It is a row *of this card*, so it takes the
+    /// card's rhythm rather than a height of its own, and the panel's copy and the card's
+    /// (`IslandCardView.actionRowHeight`) come from that one number.
+    private var actionRowHeight: CGFloat { summaryRowHeight }
 
-    /// The bottom air the card pays *right now*: its one unit, plus `bottomPaddingWithoutActionRow` when
-    /// there is no `Hide` row under the last session row. One expression for the three readers — the
-    /// height budget, the fallback frame, and `card.bottomPadding` (pushed in `applyAppearance` /
-    /// `resizeOpenCard`), which is what `IslandCardView.contentHeight` moves the window by — so a change
-    /// here cannot leave the frame and the layout disagreeing about the card's height.
-    private var cardBottomPadding: CGFloat {
-        bottomPadding + (actionRowHeight > 0 ? 0 : bottomPaddingWithoutActionRow)
-    }
-
-    /// Add or remove the alert's action row, and report whether the card's chrome changed.
+    /// Add or remove the alert's `Hide` button **in the card's footer**, and report whether the chrome
+    /// changed.
     ///
-    /// The `Hide` button is on the card **only while an alert is armed**. A hover-opened card needs no
-    /// way out — moving the pointer away already folds it — so an explicit control there would be a
-    /// button whose only function is what leaving does for free; and the alert is the one card the user
-    /// did not ask for, which is exactly the moment a quiet way out is worth a button.
+    /// The footer itself is permanent (`IslandCardGearButton` sits at its trailing edge on every card); what
+    /// an alert adds is its way out, left of the gear. The rule is unchanged: a hover-opened card needs no
+    /// `Hide` — moving the pointer away already folds it — so an explicit control there would be a button
+    /// whose only function is what leaving does for free, and the alert is the one card the user did not ask
+    /// for, which is exactly when a quiet way out is worth a button. What has changed is that the button no
+    /// longer *creates* its row: the footer is there with or without it, so this moves no number the card's
+    /// height is made of — only which controls the row lays out.
     @discardableResult
     private func syncActionRow() -> Bool {
         guard let card else { return false }
@@ -1206,15 +1272,18 @@ final class IslandPanel {
         return true
     }
 
-    /// Resize an open card to its current height, top edge anchored, without touching hover state. Two
-    /// things change that height: the fold, and the action row coming or going with an alert.
+    /// Resize an open card to its current height, top edge anchored, without touching hover state. One
+    /// thing changes that height now: the fold — a row count moving, or the empty line standing in for a
+    /// list that has gone. The footer's 24 is in every card and the `Hide` button rides inside it, so an
+    /// alert adds and removes nothing that this has to pay for.
     private func resizeOpenCard() {
         guard visible, expandedState, let card else { return }
         let metrics = currentMetrics()
         card.contentTop = contentTop(for: metrics)
-        // The action row coming or going moves the bottom air with it (`cardBottomPadding`), so the
-        // shrink below is the row's 24 *and* this step, never one of them.
-        card.bottomPadding = cardBottomPadding
+        // One step on the bottom in both states — the footer holds the last row off the edge either way —
+        // so this is the same number `applyAppearance` pushes, kept here because a card can also be open
+        // while this runs.
+        card.bottomPadding = bottomPadding
         card.needsLayout = true
         animateFrame(to: frame(expanded: true, metrics: metrics))
     }
@@ -1254,6 +1323,7 @@ final class IslandPanel {
         }
         card.rowViews = rowViews
         rebuildSummary(in: card)
+        rebuildEmptyState(in: card)
         // A row built on this tick has to inherit the current visibility along with everything
         // else, or the ring on a freshly built busy row would start before anyone could see it.
         updateRowOnScreen()
@@ -1263,6 +1333,9 @@ final class IslandPanel {
         let alpha: CGFloat = expandedState ? 1 : 0
         for view in rowViews where view.alphaValue != alpha {
             view.alphaValue = alpha
+        }
+        if let empty = card.emptyStateView, empty.alphaValue != alpha {
+            empty.alphaValue = alpha
         }
         if let summary = card.summaryView, summary.alphaValue != alpha {
             summary.alphaValue = alpha
@@ -1284,6 +1357,25 @@ final class IslandPanel {
             card.addSubview(summary)
             card.summaryView = summary
         }
+    }
+
+    /// Add or drop the one inert line the card shows when it has **no session rows at all**.
+    ///
+    /// The card must never be bare padding: with the menubar item hidden the island is the app's only
+    /// surface, so an empty ocbar has to say *why* the card is empty rather than draw an empty box under a
+    /// gear. It is one `rowHeight` tall and the card's height comes from that same number
+    /// (`IslandCardView.emptyStateHeight`), so this is content like any other row — created, removed and
+    /// alpha-synced by the same path — and never a special case in the frame.
+    private func rebuildEmptyState(in card: IslandCardView) {
+        guard visibleRows.isEmpty else {
+            card.emptyStateView?.removeFromSuperview()
+            card.emptyStateView = nil
+            return
+        }
+        guard card.emptyStateView == nil else { return }
+        let view = IslandEmptyStateView(frame: .zero)
+        card.addSubview(view)
+        card.emptyStateView = view
     }
 
     /// The collapsed pill's readouts, as one dictionary: how many sessions are in
@@ -1358,8 +1450,10 @@ final class IslandPanel {
     }
 
     private func hide() {
-        // An alert cannot outlive the card it was showing: no rows means no card,
-        // and a panel being retired is a screen that is gone.
+        // An alert cannot outlive the card it was showing: a disabled island has no card to open one on,
+        // and a panel being retired is a screen that is gone. (An empty list is no longer one of the
+        // reasons to hide — the card says so instead, see `update` — so this is the only place an alert
+        // dies with the panel.)
         clearAlert()
         // A dismissal latch dies with the panel too: it latches the *hover* open off, and there is
         // nothing to hover once the island is off screen — leaving it set would make a returning island
@@ -1409,9 +1503,10 @@ final class IslandPanel {
         // Flush against the top edge: the card's own `draw` squares the top corners on every
         // display — see there for why the shape does not vary with the screen.
         card.contentTop = expanded ? contentTop(for: metrics) : rowInset
-        // Same rule as `contentTop`, one edge down: the extra step is the *expanded* card's, and it only
-        // applies while the card has no action row to sit above (`cardBottomPadding`).
-        card.bottomPadding = expanded ? cardBottomPadding : bottomPadding
+        // One step on the bottom in both states: the footer (`actionRowHeight`) sits between the last
+        // session row and the edge whether or not an alert's `Hide` is in it, so the bottom no longer has
+        // an expanded-only step to mirror the top's.
+        card.bottomPadding = bottomPadding
         card.rowViews = rowViews
         card.needsLayout = true
 
@@ -1420,10 +1515,14 @@ final class IslandPanel {
 
         let collapsedAlpha: CGFloat = expanded ? 0 : 1
         let rowsAlpha: CGFloat = expanded ? 1 : 0
-        // Everything the card holds that is not the collapsed pill: the rows, the folded summary, and the
-        // alert's action row — so the `Hide` button is invisible with the rows when the card is folded.
+        // Everything the card holds that is not the collapsed pill: the rows, the empty line that stands in
+        // for them when there are none, the folded summary, and the footer's two controls — so the gear is
+        // invisible with the rows when the card is folded, and nothing in the footer can be clicked there
+        // either (`IslandCardView.hitTest` gates on the same alpha).
         var contentViews: [NSView] = rowViews
+        if let empty = card.emptyStateView { contentViews.append(empty) }
         if let summary = card.summaryView { contentViews.append(summary) }
+        contentViews.append(card.settingsButton)
         if let actionButton = card.actionButton { contentViews.append(actionButton) }
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
@@ -1467,9 +1566,9 @@ final class IslandPanel {
         }
     }
 
-    /// Resize an open card (the fold moved, or the alert's action row came or went). Animated, because the
-    /// card is on screen and a height change is information the user is reading; the animator is what
-    /// makes it supersede any open/fold still in flight (see `setFrame`).
+    /// Resize an open card (the fold moved, or the rows went away and the empty line took their place).
+    /// Animated, because the card is on screen and a height change is information the user is reading; the
+    /// animator is what makes it supersede any open/fold still in flight (see `setFrame`).
     private func animateFrame(to target: NSRect) {
         setFrame(target, display: true, animated: true, duration: 0.25)
     }
@@ -1648,12 +1747,13 @@ final class IslandPanel {
         // card the pointer is still reading grows back in the same frame the mark leaves.
         let contentChanged = refoldCard()
         applyAlertMark()
-        // The alert's chrome goes with the alert — the `Hide` button exists only while one is armed — and
-        // that is a height change like any other, so an open card resizes. It is not a fold: `endAlert` and
-        // `retractAlert` leave the card to the hover machine, which is what makes this the one exit that
-        // shrinks an open card rather than closing it. (`collapse` folds first, so this is a no-op there —
-        // `resizeOpenCard` is guarded on `expandedState`, and the restored rows come back invisibly for the
-        // next open.)
+        // The alert's `Hide` button goes with the alert — it exists only while one is armed — and the footer it sat
+        // in does not, so that alone moves no height and only re-lays the footer's contents out. What can still
+        // move an open card here is the *rows*: the scoped list becomes the whole list again. And it is not a
+        // fold either: `endAlert` and `retractAlert` leave the card to the hover machine, which is what makes
+        // this the one exit that shrinks an open card rather than closing it. (`collapse` folds first, so this
+        // is a no-op there — `resizeOpenCard` is guarded on `expandedState`, and the restored rows come back
+        // invisibly for the next open.)
         if syncActionRow() || contentChanged { resizeOpenCard() }
     }
 
@@ -1715,26 +1815,44 @@ private final class IslandWindow: NSPanel {
 
 /// Draws the black capsule (radius per state) and owns click handling for the
 /// whole surface. Hover is polled by `IslandPanel`, not tracked here.
+///
+/// It holds four kinds of child: the session rows, the inert `+k more` footnote, the inert line that stands
+/// in for the rows when there are none, and the footer's two controls — the settings gear, which is always
+/// there, and the alert's `Hide`, which joins it.
 private final class IslandCardView: NSView {
     var onClick: (@MainActor () -> Void)?
     var rowViews: [IslandRowView] = [] {
         didSet { needsLayout = true }
     }
     /// The inert `+k more` row, when the list was folded. Never part of
-    /// `rowViews`: `hitTest` below hands clicks to session rows and (while an alert
-    /// is armed) to the `Hide` button in its own frame, and never to this, so a
-    /// click on the summary falls through to the card's expand/collapse toggle
-    /// like any other blank part of the card.
+    /// `rowViews`: `hitTest` below hands clicks to session rows and to the footer's
+    /// controls in their own frames, and never to this, so a click on the summary
+    /// falls through to the card's expand/collapse toggle like any other blank part
+    /// of the card.
     var summaryView: IslandSummaryView? {
         didSet { needsLayout = true }
     }
-    /// The alert's action row — the card's one interactive thing that is not a session row. Nil unless
-    /// an alert is armed (`IslandPanel.syncActionRow`), and deliberately not part of `rowViews`: it is
-    /// the summary row's opposite, in that it *does* claim exactly its own frame in `hitTest` while the
-    /// summary claims nothing.
+    /// The inert line the card shows when it has **no session rows at all** (`No OpenCode sessions`). Owned by
+    /// the panel, which is what knows there is nothing to list (`IslandPanel.rebuildEmptyState`), and inert for
+    /// the summary's reason: `hitTest` never names it, so a click on it falls through to the card's toggle.
+    /// Its height is `emptyStateHeight` — one row's — which `contentHeight` and `layout()` both read.
+    var emptyStateView: IslandEmptyStateView? {
+        didSet { needsLayout = true }
+    }
+    /// The alert's `Hide` button, in the footer's row **left of the gear**. Nil unless an alert is armed
+    /// (`IslandPanel.syncActionRow`), and deliberately not part of `rowViews`: it is the summary row's
+    /// opposite, in that it *does* claim exactly its own frame in `hitTest` while the summary claims nothing.
     var actionButton: IslandCardButton? {
         didSet { needsLayout = true }
     }
+    /// The footer's gear, and the card's only control that is **always** there. Created here rather than
+    /// injected: it is not data — the panel does not decide whether the card has settings — so the card owns it
+    /// the way it owns its corner radius, and the panel only wires `onActivate` (`IslandPanel.makePanel`).
+    ///
+    /// Its frame comes from `layout`: trailing edge on the card's trailing inset, the footer's full height, its
+    /// width measured from the glyph (`IslandCardGearButton.width`). Nothing about it depends on the rows, the
+    /// fold or the alert, which is what keeps it still while everything above it moves.
+    let settingsButton = IslandCardGearButton(frame: .zero)
     /// Height of a one-line row. A row is as tall as the lines it shows, so this is
 /// the base: `rowHeight + (lines - 1) × rowHeightPerExtraLine`. The panel
 /// injects the model's constants, so the card and the height budget agree.
@@ -1761,44 +1879,77 @@ private final class IslandCardView: NSView {
 
     override var isFlipped: Bool { true }
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // First child, so every other view this card gains sits above it. It is the card's own furniture, not
+        // its content, which is why it is built here and not by the panel.
+        addSubview(settingsButton)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
     /// Height a row view needs, from the lines it currently shows.
     private func height(of view: IslandRowView) -> CGFloat {
         rowHeight + CGFloat(max(view.lineCount, 1) - 1) * rowHeightPerExtraLine
     }
 
+    /// Height of the line that stands in for the rows when there are none: **one row's**, because it *is* one
+    /// row — a single line of text in the rows' own column, one `rowHeight` tall. `contentHeight` and
+    /// `layout()` both take their number from here, so the card's frame and its layout cannot disagree about
+    /// the empty card either.
+    private var emptyStateHeight: CGFloat { rowHeight }
+
     /// Height the card needs for the content it currently holds. The panel sizes
     /// the window from this and `layout()` positions the very same views with the
     /// same heights, so the two can never disagree — one source of truth for the
-    /// expanded height. Empty rows fall back to a single-line row, as before.
+    /// expanded height. With no rows at all it is the empty-state line's height,
+    /// which is one row's.
     var contentHeight: CGFloat {
-        let rowTotal = rowViews.isEmpty ? rowHeight : rowViews.reduce(0) { $0 + height(of: $1) }
+        let rowTotal = rowViews.isEmpty ? emptyStateHeight : rowViews.reduce(0) { $0 + height(of: $1) }
         var total = contentTop + rowTotal
         if summaryView != nil { total += summaryRowHeight }
         total += actionRowHeight
         return total + bottomPadding
     }
 
-    /// Height of the alert's action row: the card's short-row height, the same 24 the `+k more` footnote
-    /// is laid out at, while the button is on the card. The presence is the card's own state, the number
-    /// is the card's own field, and the panel budgets for it from the same constant
-    /// (`IslandPanel.actionRowHeight`).
-    private var actionRowHeight: CGFloat { actionButton == nil ? 0 : summaryRowHeight }
+    /// Height of the card's footer row: **always** the card's short-row height, the same 24 the `+k more`
+    /// footnote is laid out at. It used to exist only while the alert's `Hide` button did; the gear makes it
+    /// permanent, so the number no longer depends on `actionButton` at all — and the panel budgets for it from
+    /// the same constant (`IslandPanel.actionRowHeight`).
+    private var actionRowHeight: CGFloat { summaryRowHeight }
 
     // Anything not claimed by a row toggles the island.
     override func mouseDown(with event: NSEvent) { onClick?() }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     // Route every click explicitly: a visible row claims its own clicks, the
-    // rest of the card claims the remainder (so clicks on the collapsed status
-    // dots still toggle, without relying on responder-chain forwarding). The
-    // summary is deliberately not a candidate, so it stays inert as a row; the
-    // alert's action row is, but only inside its own frame — the card's blank
-    // area must keep toggling the island everywhere else (`onClick` itself refuses
-    // that toggle while an alert is armed, which is where the alert's one-way-out
-    // is kept, not here).
+    // footer's controls claim theirs, and the rest of the card claims the remainder
+    // (so clicks on the collapsed status dots still toggle, without relying on
+    // responder-chain forwarding). The summary and the empty-state line are
+    // deliberately not candidates, so they stay inert as rows; the two footer
+    // controls are, but only inside their own frames — the card's blank area must
+    // keep toggling the island everywhere else (`onClick` itself refuses that
+    // toggle while an alert is armed, which is where the alert's one-way-out is
+    // kept, not here).
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard bounds.contains(local) else { return nil }
+        // **The gear first, and before the alert's refusal below.** It has to work while an alert is armed:
+        // `Hide` is that alert's answer, and settings are not an answer to anything — the card's blank area is
+        // the one place that deliberately stops toggling then. Same rule as the button: the view itself, not
+        // its `hitTest`, so a click never descends into the glyph.
+        //
+        // **The alpha gate is load-bearing here, not a formality.** While the card is collapsed the window is
+        // the pill's frame, and on an *empty* card the footer starts at `contentTop` (8) in a 24/32pt capsule —
+        // so the gear's frame can lie inside the collapsed bounds. It is alpha 0 there because every fold goes
+        // through `applyAppearance` with the gear in `contentViews`, and this gate is what turns that into "the
+        // click falls through to the pill's toggle". A collapsed gear that kept its alpha would be a dead
+        // 31 × 24 hole in the island.
+        if settingsButton.alphaValue > 0.5, settingsButton.frame.contains(local) {
+            return settingsButton
+        }
         if let actionButton, actionButton.alphaValue > 0.5, actionButton.frame.contains(local) {
             // The button itself, not `actionButton.hitTest`: its frame is the target, and letting AppKit
             // descend one level further would hand the click to the label inside it, which does nothing.
@@ -1821,18 +1972,39 @@ private final class IslandCardView: NSView {
             view.frame = NSRect(x: inset, y: y, width: width, height: h)
             y += h
         }
+        if rowViews.isEmpty, let emptyStateView {
+            // The line that stands in for an empty list, in the rows' own column — so its text starts
+            // exactly where a folder name would, rather than under the status glyph that is not there. One
+            // row tall, and `emptyStateHeight` is the same number `contentHeight` counted for it.
+            emptyStateView.frame = NSRect(x: inset, y: y, width: width, height: emptyStateHeight)
+            y += emptyStateHeight
+        }
         if let summaryView {
             summaryView.frame = NSRect(x: inset, y: y, width: width, height: summaryRowHeight)
             y += summaryRowHeight
         }
-        // The action row closes the card: the last child, trailing (right-aligned to the rows' own
-        // inset), under everything, with no divider above it — the card's own placement, and it keeps
-        // the button out of the rows' vertical rhythm rather than pretending to be one of them.
+        // The footer closes the card: the last row, under everything, with no divider above it — the card's
+        // own placement, and it keeps the controls out of the rows' vertical rhythm rather than pretending to
+        // be one of them.
+        //
+        // **The gear is the fixed point in it**: measured from the card's trailing inset, so it sits at the
+        // same x on a hover card, an alert card and an empty one, and `Hide` arriving beside it moves nothing
+        // to its right. The footer's height is the card's short row in both states.
+        let footerY = y
+        settingsButton.frame = NSRect(
+            x: bounds.width - inset - IslandCardGearButton.width,
+            y: footerY,
+            width: IslandCardGearButton.width,
+            height: actionRowHeight
+        )
+        // `Hide` keeps the footer's trailing end but now sits **left of the gear**, one of the card's own
+        // column gaps away (`islandRowGlyphGap`), on the same row: the gear is the card's one permanent
+        // control, and the alert's way out queues up behind it rather than taking its corner.
         if let actionButton {
             let width = IslandCardButton.width
             actionButton.frame = NSRect(
-                x: bounds.width - inset - width,
-                y: y,
+                x: bounds.width - inset - IslandCardGearButton.width - islandRowGlyphGap - width,
+                y: footerY,
                 width: width,
                 height: actionRowHeight
             )
@@ -3567,12 +3739,12 @@ private final class IslandRowView: NSView {
     }
 }
 
-// MARK: - Action row
+// MARK: - Footer
 
-/// The alert's way out: the card's one button, `Hide` — a shape that exists in order to be clicked.
+/// The alert's way out: the card's `Hide` button — a shape that exists in order to be clicked.
 ///
 /// **Every number is this card's** (see the constants above for the full accounting, including what the
-/// resting ground cost). In short: a quiet way out, trailing, under the content, hiding without acting —
+/// resting ground cost). In short: a quiet way out, in the footer, left of the gear, hiding without acting —
 /// with the type, the tone, the ground, the hover and the height all taken from something this card
 /// already draws. The one genuinely new number in the whole button is the *resting tone of an actionable
 /// label* (α0.55): every other alpha here belongs to text that cannot be pressed.
@@ -3589,7 +3761,7 @@ private final class IslandRowView: NSView {
 /// surface's idiom, and this button is not a link to anything.)
 ///
 /// Its width is `width`; its height is the card's, not its own — the card lays it out at
-/// `summaryRowHeight`, so the action row cannot be one height for the budget and another on screen.
+/// `summaryRowHeight`, so the footer cannot be one height for the budget and another on screen.
 private final class IslandCardButton: NSView {
 
     /// Clicked. Answered by the *host*, with the same dismissal a row click uses and without the focus
@@ -3606,7 +3778,7 @@ private final class IslandCardButton: NSView {
     /// points inside the frame and clips at the edge, so a frame at the advance shaves the trailing `e`
     /// (measured: `Hide` at 11pt needs 28.181 where the advance is 24.500).
     ///
-    /// No height here: the card lays the action row out at `summaryRowHeight`.
+    /// No height here: the card lays the button out at the footer's `summaryRowHeight`.
     static let width: CGFloat = {
         let label = NSTextField(labelWithString: islandActionButtonLabel)
         label.font = font
@@ -3708,6 +3880,185 @@ private final class IslandCardButton: NSView {
     // The panel is a non-key, non-activating window, so without this the first click is delivered
     // nowhere and the button is silently dead while its hover still works.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+/// The card's settings gear: the footer's trailing control, and the way into the dropdown menu while the
+/// menubar item is hidden. It is the one thing on **every** card, empty, hovered or alerting — which is why
+/// it is asked for by `IslandCardView` itself and only *wired* by the panel.
+///
+/// **A glyph instead of a word, and nothing else about it is new.** Its ground, its wash, its two alphas and
+/// its hover duration are `IslandCardButton`'s constants (see the block at the top of the file): a second
+/// quiet control with a tone ladder of its own would give the card two kinds of quiet. It is the footer's
+/// peer, not its louder sibling, and `Hide` stands beside it on the same row sharing the same treatment.
+///
+/// **No pointing hand.** The card's rows are the only things here that lead somewhere (`resetCursorRects` on
+/// `IslandRowView`); a control in this card's footer says so with its ground, exactly as `Hide` does. The
+/// bubble's ✕ is the other surface's idiom and stays there.
+///
+/// **It keeps working while an alert is armed.** `IslandCardView.hitTest` claims it before the card's own
+/// blank area, whose toggle deliberately refuses the fold then: `Hide` is that alert's answer, and settings
+/// are not an answer to anything.
+private final class IslandCardGearButton: NSView {
+
+    /// Clicked. Answered by the app delegate (`IslandPanel.onSettingsRequested` → `IslandHost` →
+    /// `showMenuFromIsland`), which owns the one menu; nothing is folded here, because the menu opening does
+    /// that itself.
+    var onActivate: (@MainActor () -> Void)?
+
+    /// The glyph, already white: its tone is carried by the image view's alpha, exactly as `Hide`'s tone is
+    /// its label's — so the hover is one animatable number and the artwork never changes.
+    private static let glyphImage: NSImage? = {
+        let config = NSImage.SymbolConfiguration(pointSize: islandSettingsGlyphPointSize, weight: islandSettingsGlyphWeight)
+        guard let base = NSImage(systemSymbolName: islandSettingsSymbolName, accessibilityDescription: nil) else { return nil }
+        return islandTinted(base.withSymbolConfiguration(config) ?? base, color: .white)
+    }()
+
+    /// The gear's width: the **measured** glyph box plus the card's own 8pt either side — the same derivation
+    /// `IslandCardButton.width` uses for its label, and for the same reason (a frame at a bare advance clips
+    /// the glyph). Measured, not assumed: `gearshape.fill` at 12pt is a 15pt box, so the hit target is 31 × 24
+    /// — comfortably larger than the 24pt row it stands in, while its ink stays at a session row's disc size.
+    ///
+    /// The fallback is a row glyph's box rather than zero: a missing symbol must not leave the footer's only
+    /// permanent control a narrow hole with nothing in it.
+    static let width: CGFloat = {
+        (glyphImage?.size.width ?? islandRowGlyphSize) + 2 * islandActionButtonHorizontalPadding
+    }()
+
+    private let fill = NSView()
+    private let glyph = NSImageView()
+    private var tracking: NSTrackingArea?
+    private var hovering = false {
+        didSet {
+            guard hovering != oldValue else { return }
+            applyHover()
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // The ground is `Hide`'s, layer for layer: plain white with its **alpha as the tone**, at the wash's own
+        // geometry, so the two footer controls cannot be the same treatment only by eye.
+        fill.wantsLayer = true
+        fill.layer?.backgroundColor = NSColor.white.cgColor
+        fill.layer?.cornerRadius = islandHoverWashRadius
+        fill.alphaValue = islandActionButtonRestingFillAlpha
+        addSubview(fill)
+
+        glyph.image = Self.glyphImage
+        glyph.imageScaling = .scaleNone
+        glyph.alphaValue = islandActionButtonForegroundAlpha
+        addSubview(glyph)
+
+        setAccessibilityLabel(islandSettingsAccessibilityLabel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        fill.frame = bounds.insetBy(dx: islandHoverWashDX, dy: islandHoverWashDY)
+        // The glyph's own box, centred. No nudge: `gearshape.fill` is symmetric inside its box, so unlike the
+        // pill's ring there is nothing for the eye to correct here.
+        let size = Self.glyphImage?.size ?? .zero
+        glyph.frame = NSRect(
+            x: (bounds.width - size.width) / 2,
+            y: (bounds.height - size.height) / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    /// `Hide`'s transition exactly: two alphas, the file's own curve, nothing else — no scale, no pressed state,
+    /// no focus ring.
+    private func applyHover() {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = islandActionButtonHoverDuration
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.22, 1.0, 0.36, 1.0)
+            fill.animator().alphaValue = hovering ? islandHoverWashAlpha : islandActionButtonRestingFillAlpha
+            glyph.animator().alphaValue = hovering ? islandActionButtonHoverForegroundAlpha : islandActionButtonForegroundAlpha
+        }
+    }
+
+    /// Hover by tracking area, like the card's rows and `Hide` beside it. The panel's *poll* is only for the
+    /// island's outer rect, where a tracking area fights the window's frame animation.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    /// Swallow the press — the card's blank area toggles the island, and a press that started here must never
+    /// reach it — and act on release *inside*, so dragging off the gear cancels it, exactly as `Hide` does.
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+        onActivate?()
+    }
+
+    // The panel is a non-key, non-activating window: without this the first click is delivered nowhere and the
+    // gear is silently dead while its hover still works.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// MARK: - Empty state
+
+/// The card's one line when there is **nothing to list**: `No OpenCode sessions`, the words the dropdown uses
+/// for the same situation.
+///
+/// It is styled as a row's line 1 at the dim end of the card's ladder — the folder name's own font, size and
+/// column (12.5 medium, `islandRowTextInset`) at white α0.5, the tone of the context line and the `+k more`
+/// footnote — because the one thing it must not read as is a row: full white is a session's name, and α0.5 is
+/// how this card says *absent*. Nothing is dimmed further and nothing is added: an empty state that whispers
+/// is a bug report, and one that dresses up is a fake row.
+///
+/// **Inert, like the summary.** It is never in `IslandCardView.rowViews` and `hitTest` never names it, so a click
+/// on it falls through to the card's toggle; it has no `onSelect`, no mark, no hover and no pointing hand.
+private final class IslandEmptyStateView: NSView {
+
+    private let label = NSTextField(labelWithString: islandEmptyStateText)
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        label.font = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .medium)
+        label.textColor = NSColor.white.withAlphaComponent(0.5)
+        label.lineBreakMode = .byTruncatingTail
+        label.usesSingleLineMode = true
+        addSubview(label)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    override func layout() {
+        super.layout()
+        // A row's line 1: its text column, its trailing inset, its line centred the way a one-line row centres
+        // its folder name.
+        let size = label.intrinsicContentSize
+        label.frame = NSRect(
+            x: islandRowTextInset,
+            y: (bounds.height - size.height) / 2,
+            width: max(0, bounds.width - islandRowTextInset - islandRowTrailingInset),
+            height: size.height
+        )
+    }
 }
 
 // MARK: - Summary row
@@ -3924,6 +4275,15 @@ final class IslandHost {
     /// delegate; the host is only a pass-through for it (`rowActivated`).
     var onSelectSession: (@MainActor (Int32?) -> Void)?
 
+    /// Fired when the card's footer gear is clicked, on whichever screen's island it was. Set by the app
+    /// delegate, which owns the one menu (`showMenuFromIsland`).
+    ///
+    /// **A pure pass-through, and deliberately not host-owned like the two above.** The menu is one object
+    /// for the whole app rather than one per screen, so there is nothing to fan out; and nothing is
+    /// collapsed here — the menu opening collapses every island itself
+    /// (`NSMenuDelegate.menuWillOpen`), so a `collapse()` on this path would only do it twice.
+    var onSettingsRequested: (@MainActor () -> Void)?
+
     init() {
         rebuild(for: NSScreen.screens)
         observer = NotificationCenter.default.addObserver(
@@ -4053,6 +4413,9 @@ final class IslandHost {
             let panel = IslandPanel(screen: screen)
             panel.onRowActivated = { [weak self] pid in self?.rowActivated(pid: pid) }
             panel.onHideRequested = { [weak self] in self?.hideRequested() }
+            // The one panel callback with no host behaviour behind it: the menu is one object, so this
+            // travels straight up and nothing is folded on the way (`onSettingsRequested`).
+            panel.onSettingsRequested = { [weak self] in self?.onSettingsRequested?() }
             return panel
         }
         // Re-apply the current state so a rebuild does not blank the islands.

@@ -140,6 +140,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         island.onSelectSession = { [weak self] pid in
             self?.monitor.focusSession(pid: pid)
         }
+        // With the island on, the menubar item is hidden (`render`), so the card's gear is the way into
+        // the dropdown: the same `menu` the status item would have shown, popped up at the pointer.
+        island.onSettingsRequested = { [weak self] in self?.showMenuFromIsland() }
         monitor.onTransition = { [weak self] status, dir, pid, title in
             self?.showBubble(status: status, projectDir: dir, pid: pid, title: title)
         }
@@ -174,6 +177,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func render(_ state: AppState, forceMenuRefresh: Bool = false) {
         currentState = state
+        // **The menubar item exists only while the island is off.** Strictly: with the island on, the
+        // island is the app's only surface and its card's gear drops this same `menu` (see
+        // `showMenuFromIsland`), so there is nothing for the item to add — and no session-count
+        // condition, because the island itself stays up with zero sessions, which is where settings
+        // and Quit stay reachable. Every path that can change the toggle (`islandToggled`, launch,
+        // each poll tick) runs through this method, so the visibility is decided here and nowhere
+        // else. It is set before `updateButton`, which skips its (now invisible) work while hidden.
+        statusItem.isVisible = !islandEnabled
         // `updateRunningMark` first: it owns the running mark's angle (it holds it at the resting angle
         // when Reduce Motion forbids turning it), and `updateButton` below renders that angle into the
         // title. Swapping the two would draw one frame at a stale angle on the tick Reduce Motion
@@ -226,6 +237,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateButton(for state: AppState) {
+        // A hidden status item paints nothing: title, running mark and accessibility label would all be
+        // invisible work, so skip it. `updateRunningMark()` and `refreshBusyMarks()` are deliberately
+        // *not* skipped along with it — they also repaint the dropdown rows' running marks
+        // (`busyMenuItems`), and the dropdown can be opened from the island's gear while the menubar
+        // item is hidden, so a busy session's row must keep turning. Do not "optimise" that away.
+        guard statusItem.isVisible else { return }
         guard let button = statusItem.button else { return }
 
         let cfg = NSImage.SymbolConfiguration(pointSize: titleMarkPointSize, weight: .medium)
@@ -1162,7 +1179,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ever disagreeing.
         if bubbleEnabled {
             bounceIcon()
-            bubble.show(anchor: statusItem.button, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
+            // **A hidden item is passed as no anchor, deliberately.** With the island on there is no icon to
+            // hang the bubble under, and asking a hidden item's button for its window is asking for `nil` on
+            // some macOS versions and for a rect that is not on screen on others — so the app says which
+            // case it is instead: no anchor makes `StatusBubble` place the bubble at every configured
+            // position (default `topCenter`), i.e. under the island, on every screen.
+            bubble.show(anchor: statusItem.isVisible ? statusItem.button : nil, title: name, body: body, color: color, symbol: symbol, background: bubbleColor.color, positions: Array(bubblePositions), seconds: TimeInterval(bubbleSeconds)) { [weak self] in
                 self?.monitor.focusSession(pid: pid)
             }
         } else if islandEnabled {
@@ -1259,6 +1281,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func bounceIcon() {
+        // No icon, no bounce: the bounce exists only to point at the bubble anchored to the status
+        // item, and while the island is on there is no status item on screen.
+        guard statusItem.isVisible else { return }
         guard let button = statusItem.button else { return }
         button.wantsLayer = true
         let bounce = CAKeyframeAnimation(keyPath: "transform.scale")
@@ -1267,6 +1292,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         bounce.duration = 0.6
         bounce.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         button.layer?.add(bounce, forKey: "bubbleBounce")
+    }
+
+    /// The island card's gear, while the menubar item is hidden: drop the dropdown `menu` at the
+    /// pointer. `in: nil` is screen coordinates and the pointer is on the gear when this fires, so the
+    /// menu opens at the click; re-anchoring it to a view would put it in the wrong place.
+    ///
+    /// No `NSApp.activate(ignoringOtherApps:)`: the app is `.accessory` and the island panel is
+    /// deliberately non-activating, and never pulling focus away from the terminal is a standing
+    /// invariant here. A pop-up menu from a mouse-down in our own window tracks without activation —
+    /// this is the deliberate choice, not an oversight, if a later report says the menu "doesn't
+    /// highlight".
+    ///
+    /// Everything else that must happen as the menu opens (`collapse` every island, `stopPulsing`,
+    /// the forced refresh) is already in `menuWillOpen`; the panel's own hover latch keeps the card
+    /// from re-opening under the pointer after the menu closes. `menu` is both `statusItem.menu` and
+    /// the object popped up here, which is safe because the item is hidden and a pop-up menu is
+    /// modal — it cannot be open twice.
+    private func showMenuFromIsland() {
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
