@@ -2679,6 +2679,25 @@ private final class IslandMarkerGroup: NSView, IslandFlankElement {
     /// instead of from a guess that could drift away from them.
     static let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
 
+    /// The line box an 11pt count asks for — **14pt**, the height `layout()` centres in the badge, measured
+    /// from the font below rather than typed in. `IslandCPUView` reads it because the two flanks are handed
+    /// one region rect: from the height alone it can work out where the count's top edge, and therefore its
+    /// baseline, falls.
+    static let countLineHeight: CGFloat = {
+        let label = NSTextField(labelWithString: "0")
+        label.font = numberFont
+        return label.intrinsicContentSize.height
+    }()
+
+    /// Where the count's baseline falls, measured from the top of the box the badge is given: the count
+    /// label's top edge (half of what is left of `height` over its line box), then one ascent — a single line
+    /// of text is drawn with its baseline exactly one ascent below the top of its frame. **This is what puts
+    /// the CPU readout on the count's line**: centring each label in its own box aligns two boxes' middles,
+    /// and the boxes are 14pt and 12pt, so no centre can be a shared baseline.
+    static func countBaseline(atHeight height: CGFloat) -> CGFloat {
+        (height - countLineHeight) / 2 + numberFont.ascender
+    }
+
     /// Point size and weight of every badge glyph on the pill — one value for the
     /// whole pill, read both by `badgeImage` (what is drawn) and by
     /// `widestGlyphWidth` (what is measured), so the two cannot disagree. At this size the
@@ -2768,12 +2787,14 @@ private final class IslandMarkerGroup: NSView, IslandFlankElement {
 
     override func layout() {
         super.layout()
-        let labelSize = numberLabel.intrinsicContentSize
+        // The height is `countLineHeight` — the same number `countBaseline(atHeight:)` is derived from — so
+        // the baseline the CPU readout aligns to is the one this label is actually drawn on.
+        let labelHeight = Self.countLineHeight
         numberLabel.frame = NSRect(
             x: markerOffset,
-            y: (bounds.height - labelSize.height) / 2,
+            y: (bounds.height - labelHeight) / 2,
             width: islandLabelWidth(for: numberLabel),
-            height: labelSize.height
+            height: labelHeight
         )
         if let image = marker {
             glyphView.frame = NSRect(
@@ -2985,13 +3006,6 @@ private final class IslandCPUView: NSView, IslandFlankElement {
         }.max() ?? 0
     }()
 
-    /// How far the label is raised above the box's centre, in points. A 9pt cap band sits 0.2709pt
-    /// lower than an 11pt one, and that delta is linear in the size gap: at 9.5pt it is
-    /// 0.2709 × 0.75 = 0.2032. (Measured the same way at both sizes — the label's frame-centred
-    /// cap-band centre against the 11pt counts': 0.0513 at 9pt, 0.0385 at 9.5pt, the same 0.75.)
-    /// The eye reads 0.19. Same class of correction as `IslandActivityView.pillMarkDrop` (0.5), opposite sign.
-    private static let labelRaise: CGFloat = 0.1875
-
     /// The **one-core** share the caller published (`0…999`, fractional); nil = unknown. The unit is
     /// not part of the value — it is `unit` below, and only the drawing changes when it does.
     var value: Double? {
@@ -3047,12 +3061,22 @@ private final class IslandCPUView: NSView, IslandFlankElement {
         shown == nil ? 0 : islandLabelWidth(for: label)
     }
 
+    /// **The readout sits on the count's baseline, not in a box of its own.** Both flanks are handed the same
+    /// region rect (`CollapsedContentView.place`), so the count's baseline is
+    /// `IslandMarkerGroup.countBaseline(atHeight:)` — the 14pt count line box centred in that height plus the
+    /// 11pt ascent — and this label's frame is dropped by its own 9.5pt ascent to meet it. Font metrics plus
+    /// the height it was given, and nothing about the string: a hidden readout draws nothing and moves nothing.
+    ///
+    /// This replaced a `labelRaise` of 0.1875pt — an eye-anchor measured at 9pt and scaled (0.25 × 0.75) to
+    /// 9.5pt. It was correcting for two boxes centred independently: their middles can line up, their baselines
+    /// cannot, and it left the readout **0.64pt** high. There is no residual nudge now, and none is wanted:
+    /// the correction is the derivation.
     override func layout() {
         super.layout()
         let size = label.intrinsicContentSize
         label.frame = NSRect(
             x: 0,
-            y: (bounds.height - size.height) / 2 - Self.labelRaise,
+            y: IslandMarkerGroup.countBaseline(atHeight: bounds.height) - Self.font.ascender,
             width: islandLabelWidth(for: label),
             height: size.height
         )
