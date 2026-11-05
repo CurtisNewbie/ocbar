@@ -17,18 +17,38 @@ private struct ServiceEndpoint {
 private func ocbar_proc_pidinfo(_ pid: Int32, _ flavor: Int32, _ arg: UInt64,
                                 _ buffer: UnsafeMutableRawPointer?, _ buffersize: Int32) -> Int32
 
-/// The server process's CPU, read from the kernel and smoothed.
+/// `proc_listchildpids` is likewise missing from the CLT SDK's Darwin module.
 ///
-/// **Only the `service.json` pid is sampled.** CPU spent in the server's own tool subprocesses
-/// (`bash`, `git`, a test run) is not counted, so a session in the middle of a build can look
-/// quiet here — this is the server's share, not the work the server is waiting on.
+/// Its answer is the **number of pids written**, not bytes, and it truncates safely at
+/// `buffersize` — so the caller reads `buffer.prefix(returned)`. The NULL-buffer probe that works
+/// for `sysctl` is useless here: `proc_listchildpids(p, NULL, 0)` returned **521** on this machine,
+/// an undocumented constant, not a count. The buffer is therefore sized up front and grown once.
+@_silgen_name("proc_listchildpids")
+private func ocbar_proc_listchildpids(_ ppid: Int32, _ buffer: UnsafeMutableRawPointer?,
+                                      _ buffersize: Int32) -> Int32
+
+/// The CPU of the server **and of the descendants it spawns** — `bash`, `git`, a build, the LSP
+/// children — read from the kernel and smoothed.
+///
+/// It is the whole tree, so CPU spent in the server's own tool subprocesses **is** counted: a
+/// session in the middle of a build shows the build, not a quiet parent waiting on it.
+///
+/// **The published number is a share of one core**, the raw kernel ratio — it can pass 100 (the tree
+/// can use several cores at once) and is clamped at 999 for the three-digit width the pill draws.
+/// Any per-machine presentation is a division by the logical core count, and it happens where the
+/// display unit is known (`IslandCPUView`), never here: this struct is the one place that must not
+/// have an opinion about what is drawn. A child that leaves the tree — daemonized, or reparented to
+/// launchd — stops contributing on the tick after it is gone.
 private struct ServiceCPUSampler {
 
     /// The process the baseline belongs to. A different pid is a different process, so the
     /// baseline resets rather than being billed across a restart (or a reused pid).
     private var pid: pid_t?
-    /// `pti_total_user + pti_total_system`, in `mach_absolute_time` units.
-    private var lastTotal: UInt64?
+    /// `pti_total_user + pti_total_system` per pid of the tree, in `mach_absolute_time` units, as of
+    /// the previous tick. Keyed by pid because the tree's membership changes: a pid present in only
+    /// one of the two maps is **skipped**, so a just-forked child's pre-fork CPU is never billed to
+    /// this tick (it had no baseline) and an exited child's total is not mistaken for a delta.
+    private var lastTotals: [pid_t: UInt64] = [:]
     private var lastMach: UInt64?
     /// Wall clock, for the gap test only: a wake from sleep advances `Date` by hours whether or
     /// not the process's totals and the mach clock moved with it, and a tick that long is not a
@@ -42,67 +62,102 @@ private struct ServiceCPUSampler {
     private static let fallAlpha = 0.2
     /// Three missed scan ticks (the monitor's 2s cadence) and the window is not a window.
     private static let staleAfter: TimeInterval = 3 * 2
-    /// One core, and the readout has three digits. The clamp is applied **before** the smoother:
-    /// pid reuse or a bogus delta must not pin the EMA at a nonsense level.
+    /// One core, and three digits: this is the raw ratio, which the tree can push past 100 by using
+    /// several cores. The clamp is applied **before** the smoother: pid reuse or a bogus delta must
+    /// not pin the EMA at a nonsense level.
     private static let maxPercent = 999.0
+    /// Eight levels is past every real tree here — server, shell, `git`, the build's own children —
+    /// and a depth limit is what stops a pathological chain (a shell spawning a shell spawning …)
+    /// from costing a syscall per level on every 2s tick.
+    private static let maxDepth = 8
+    /// The whole tree in one tick, root included. Past this the reading stops describing "this
+    /// server's work": a fan-out that wide (`xargs -P`, a compiler pool) belongs to the machine, and
+    /// 64 `PROC_PIDTASKINFO` calls per 2s tick is already the expensive end of a readout.
+    private static let maxPIDs = 64
 
     mutating func reset() {
         pid = nil
-        lastTotal = nil
+        lastTotals = [:]
         lastMach = nil
         lastAt = nil
         smoothed = nil
     }
 
-    /// The smoothed share of one core in percent, or nil when there is nothing honest to draw: no
-    /// baseline yet (a first reading is never a `0%`), a gap too long to blame on the process, or a
-    /// pid the kernel would not report. **Every failure re-baselines** — otherwise the next
-    /// successful sample would count the whole outage as CPU.
+    /// The smoothed share of one core in percent (0…999), or nil when there is nothing honest to
+    /// draw: no baseline yet (a first reading is never a `0%`), a gap too long to blame on the
+    /// process, or a root pid the kernel would not report. **Every failure re-baselines** —
+    /// otherwise the next successful sample would count the whole outage as CPU.
     mutating func sample(pid newPID: pid_t) -> Double? {
         if pid != newPID {
             reset()
             pid = newPID
         }
 
-        var info = proc_taskinfo()
+        // The tree is walked before the clock is read, so the denominator covers the interval the
+        // counters were actually read across rather than ending before them.
+        var current: [pid_t: UInt64] = [:]
         let size = Int32(MemoryLayout<proc_taskinfo>.stride)
-        let returned = withUnsafeMutablePointer(to: &info) {
-            ocbar_proc_pidinfo(newPID, PROC_PIDTASKINFO, 0, $0, size)
+        for treePID in Self.tree(root: newPID) {
+            var info = proc_taskinfo()
+            let returned = withUnsafeMutablePointer(to: &info) {
+                ocbar_proc_pidinfo(treePID, PROC_PIDTASKINFO, 0, $0, size)
+            }
+            // The stride check, per pid: a `proc_taskinfo` whose layout disagrees with the SDK's
+            // answers 0 with `ENOMEM`, and a pid that exits mid-walk answers 0 for real. Either way
+            // this pid is simply absent from this tick's map, which is what keeps an exited child
+            // from being billed as a full-window delta.
+            guard returned == size else { continue }
+            current[treePID] = info.pti_total_user &+ info.pti_total_system
         }
-        guard returned == size else {
-            lastTotal = nil
+
+        // The root is the only pid whose silence means "not a measurement": every descendant can
+        // exit between the walk and its own syscall on any tick, but a root that will not report is
+        // the existing outage case (service gone, pid reused), so it re-baselines as before.
+        guard current[newPID] != nil else {
+            lastTotals = [:]
             lastMach = nil
             lastAt = nil
             smoothed = nil
             return nil
         }
 
-        let total = info.pti_total_user &+ info.pti_total_system
         let now = mach_absolute_time()
         let at = Date()
 
-        guard let baseTotal = lastTotal, let baseMach = lastMach, let baseAt = lastAt else {
-            lastTotal = total
+        guard let baseMach = lastMach, let baseAt = lastAt else {
+            lastTotals = current
             lastMach = now
             lastAt = at
             return nil
         }
 
         let elapsed = at.timeIntervalSince(baseAt)
-        guard elapsed > 0, elapsed <= Self.staleAfter, now > baseMach, total >= baseTotal else {
+        guard elapsed > 0, elapsed <= Self.staleAfter, now > baseMach else {
             // Re-baseline only: this tick is not a measurement, so it must not be folded in as one.
-            lastTotal = total
+            lastTotals = current
             lastMach = now
             lastAt = at
             smoothed = nil
             return nil
         }
 
+        // Only pids measured **both** ticks contribute, and only forward. A counter that went
+        // backwards is pid reuse or a garbage reading, never negative CPU: it contributes 0 instead
+        // of poisoning the sum. The add wraps because a bogus counter must not trap; the percent is
+        // clamped below regardless. A child that just forked has no baseline and so contributes
+        // nothing this tick — its pre-fork CPU is never billed here.
+        var delta: UInt64 = 0
+        for (treePID, total) in current {
+            guard let previous = lastTotals[treePID], total >= previous else { continue }
+            delta = delta &+ (total - previous)
+        }
+
         // **Units: the ratio needs no timebase conversion.** `pti_total_*` are in mach_absolute_time
         // units, the same clock as the denominator; reading them as nanoseconds would be off by
-        // ~41× on this machine.
+        // ~41× on this machine. One core is `100` here; dividing by the core count is the display's
+        // job, because only the display knows which unit was asked for.
         let instant = min(Self.maxPercent,
-                           max(0, 100 * Double(total - baseTotal) / Double(now - baseMach)))
+                          max(0, 100 * Double(delta) / Double(now - baseMach)))
 
         let value: Double
         if let previous = smoothed {
@@ -112,10 +167,60 @@ private struct ServiceCPUSampler {
         }
 
         smoothed = value
-        lastTotal = total
+        lastTotals = current
         lastMach = now
         lastAt = at
         return value
+    }
+
+    /// The pids this readout covers: the root, then its descendants breadth-first.
+    ///
+    /// Breadth-first on purpose — when the cap bites, the pids kept are the shallow ones, which in
+    /// this tree are the tools the server is actually waiting on. The `seen` set is not decoration:
+    /// a duplicate pid would make a `Dictionary(uniqueKeysWithValues:)` build trap.
+    private static func tree(root: pid_t) -> [pid_t] {
+        var seen: Set<pid_t> = [root]
+        var ordered: [pid_t] = [root]
+        var queue: [(pid: pid_t, depth: Int)] = [(root, 0)]
+        // An index, not `removeFirst`: popping from the front of an array is O(n) and this queue is
+        // touched on every tick.
+        var head = 0
+
+        while head < queue.count, ordered.count < Self.maxPIDs {
+            let (parent, depth) = queue[head]
+            head += 1
+            guard depth < Self.maxDepth else { continue }
+            for child in children(of: parent) where !seen.contains(child) {
+                seen.insert(child)
+                ordered.append(child)
+                queue.append((child, depth + 1))
+                if ordered.count >= Self.maxPIDs { break }
+            }
+        }
+        return ordered
+    }
+
+    /// The direct children of `parent`, from one `proc_listchildpids` call.
+    ///
+    /// 16 is the ordinary tree (the server plus its handful of tool subprocesses). A return equal to
+    /// the capacity is ambiguous — exactly full, or truncated — so it is retried **once** at 64: one
+    /// retry, not a loop, because a fan-out wider than the per-tick cap cannot be enumerated more
+    /// cheaply, and the truncated head is already representative. A failing call answers ≤ 0, which
+    /// is an empty list, not an error worth propagating: the parent's own total still counts.
+    private static func children(of parent: pid_t) -> [pid_t] {
+        for capacity in [16, 64] {
+            var buffer = [pid_t](repeating: 0, count: capacity)
+            let returned = buffer.withUnsafeMutableBytes { raw in
+                // `buffersize` is bytes, the return value is a pid count: they are not the same
+                // number, and conflating them is how this truncates silently at 4 pids.
+                Int(ocbar_proc_listchildpids(parent, raw.baseAddress, Int32(raw.count)))
+            }
+            guard returned > 0 else { return [] }
+            if returned < capacity || capacity == 64 {
+                return Array(buffer[0..<min(returned, capacity)])
+            }
+        }
+        return []
     }
 }
 
@@ -139,7 +244,8 @@ class SessionMonitor {
     /// 0.5s poll does not re-fetch each time.
     private var contextCache: [String: (ctx: SessionContext, fetchedAt: Date)] = [:]
     private let contextRefreshInterval: TimeInterval = 2
-    /// The server's own CPU, sampled once per scan tick. See `ServiceCPUSampler`.
+    /// The server tree's CPU (server + its descendants), sampled once per scan tick. See
+    /// `ServiceCPUSampler`.
     private var cpuSampler = ServiceCPUSampler()
     private var scanTimer: Timer?
     private var pollTimer: Timer?
@@ -184,7 +290,7 @@ class SessionMonitor {
             return
         }
         service = endpoint
-        // Once per tick, outside the session loop: it is about one process, not about a session.
+        // Once per tick, outside the session loop: it is about one process tree, not about a session.
         // **It is a readout only** — nothing in this class derives the ring from it.
         if serviceCPUEnabled {
             state.serviceCPU = cpuSampler.sample(pid: endpoint.pid)

@@ -95,8 +95,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let contextUsageDisplayKey = "ocbar.contextUsageDisplay"
     private let contextUsageWarnKey = "ocbar.contextUsageWarn"
     private let contextUsageCriticalKey = "ocbar.contextUsageCritical"
-    /// The collapsed pill's server-CPU readout. Not `cpuUsage`: the number is a share of **one core**
-    /// and can pass 100, so "usage" would read as whole-machine.
+    /// The collapsed pill's server-CPU readout. `serviceCPU` names **whose** CPU it is — the server
+    /// tree, not the machine — and whether it is drawn at all; the value handed over is always that
+    /// tree's share of **one core** (`AppState.serviceCPU`), and *which* unit it is drawn in is the
+    /// other half of this setting (`CPUUnit`, under its own key, `ocbar.cpuUnit`). One key per
+    /// question, because switching the unit must not reset the gate or the sampling.
     private let serviceCPUKey = "ocbar.serviceCPU"
     private let defaultContextUsageWarn = 200_000
     private let defaultContextUsageCritical = 300_000
@@ -203,8 +206,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // tick instead of on the next 2s sample — and so the pill never draws a value whose geometry
         // has just been switched off.
         let islandCPU = serviceProcessorCPUEnabled ? state.serviceCPU : nil
+        let islandCPUUnit = serviceProcessorCPUUnit
         Task { @MainActor [island] in
-            island?.update(rows: islandSnapshot, enabled: islandIsEnabled, serviceCPU: islandCPU)
+            island?.update(rows: islandSnapshot, enabled: islandIsEnabled,
+                           serviceCPU: islandCPU, cpuUnit: islandCPUUnit)
         }
 
         let sessions = state.sessions
@@ -513,17 +518,55 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         (UserDefaults.standard.object(forKey: serviceCPUKey) as? Bool) ?? true
     }
 
-    /// One checkable item, not a submenu: the readout has nothing to configure — it is a percentage —
-    /// so it is the same shape as `Show session time`.
+    /// Which unit the readout draws: **`CPUUnit` owns the key and the default (`machine`)**, because
+    /// the pill needs the same answer to size itself and to draw, and two copies of a default are
+    /// two chances to disagree.
+    private var serviceProcessorCPUUnit: CPUUnit { CPUUnit.stored }
+
+    /// The gate and the unit, in the shape the other multi-choice settings use: a checkable
+    /// "Show server CPU" (unchanged, the same key and the same action) over the two units as radio
+    /// items. It used to be one checkable item, which was right while the readout had exactly one
+    /// presentation; the unit is now the second question, and the parent title names the subject
+    /// ("Server CPU") rather than repeating the gate's verb.
     private func serviceCPUMenu() -> NSMenuItem {
-        let item = NSMenuItem(title: "Show server CPU", action: #selector(serviceCPUToggled(_:)), keyEquivalent: "")
-        item.target = self
-        item.state = serviceProcessorCPUEnabled ? .on : .off
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+
+        let toggle = NSMenuItem(title: "Show server CPU", action: #selector(serviceCPUToggled(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.state = serviceProcessorCPUEnabled ? .on : .off
+        submenu.addItem(toggle)
+        submenu.addItem(.separator())
+
+        let selected = serviceProcessorCPUUnit
+        for (index, unit) in CPUUnit.allCases.enumerated() {
+            let item = NSMenuItem(title: unit.displayName, action: #selector(serviceCPUUnitSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = unit == selected ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Server CPU", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
         return item
     }
 
     @objc private func serviceCPUToggled(_ sender: NSMenuItem) {
         UserDefaults.standard.set(!serviceProcessorCPUEnabled, forKey: serviceCPUKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    /// **`render` alone would not repaint this**, which is why the unit travels with the CPU push:
+    /// the pill is handed the same one-core `Double` on every tick, and its equality guard skips an
+    /// unchanged value — so the unit goes in beside it (`render` → `IslandHost.update`) and the
+    /// readout's own setter resets the drawn string. That is what makes the pick land on this tick
+    /// instead of on the next 2s sample.
+    @objc private func serviceCPUUnitSelected(_ sender: NSMenuItem) {
+        let all = CPUUnit.allCases
+        guard all.indices.contains(sender.tag) else { return }
+        UserDefaults.standard.set(all[sender.tag].rawValue, forKey: CPUUnit.defaultsKey)
         render(currentState, forceMenuRefresh: true)
     }
 

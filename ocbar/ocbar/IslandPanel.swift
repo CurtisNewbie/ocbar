@@ -94,8 +94,8 @@ struct IslandContext: Equatable {
 ///
 /// One constant, not two, because symmetry is what sets it: `CollapsedContentView.flankWidth`
 /// is the wider of the two sides' content requirements, applied to both. The sides want
-/// different amounts — the left holds the ring, the running count and the `CPU · 16%` readout
-/// (107.3pt of content plus clearance), the right holds the three remaining states (130) — and
+/// different amounts — the left holds the ring, the running count and the server-CPU readout
+/// (116.7pt of content plus clearance), the right holds the three remaining states (130) — and
 /// taking the smaller for the right would be the one thing this pill may not do: the right
 /// flank would be under-provisioned, and `place` trims an overrun at the capsule edge
 /// *silently*, so a fourteen-session finished count would be drawn as `1`. Symmetry at the
@@ -354,14 +354,14 @@ private let islandPlainCollapsedHeight: CGFloat = 24
 /// **Floored again by what it has to hold**, and that floor is load-bearing: the share alone is
 /// 0.14 × screenWidth, so a 1024pt-wide display asks for 143pt and clamps up to the 160 floor —
 /// and the block that capsule holds in its worst case (ring + the three two-digit badges + the
-/// bare two-digit running count + the `CPU · 999%` readout + the gaps between them,
-/// `CollapsedContentView.standInCapsuleMinWidth` = 249) is *wider than both*. That is the
+/// bare two-digit running count + the server-CPU readout at its provisioned width + the gaps
+/// between them, `CollapsedContentView.standInCapsuleMinWidth` = 258) is *wider than both*. That is the
 /// silent-failure shape this pill is built to avoid: `place` centres what it can and the view's
 /// mask trims the rest, so the finished count would be drawn as `1`.
 ///
 /// The floor is now **wider than the 240 cap**, so it wins everywhere: `max` lifts every share to
 /// it, and the fraction and the cap only ever matter if the content floor shrinks back under them.
-/// That is the honest state, not a bug — the readout is a fixed 62.7pt of provision and the block
+/// That is the honest state, not a bug — the readout is a fixed 72.1pt of provision and the block
 /// has to hold it — but it means the capsule's size is now a property of the *content*, and this
 /// function is its only override.
 func islandStandInCapsuleWidth(screenWidth: CGFloat) -> CGFloat {
@@ -624,7 +624,10 @@ final class IslandPanel {
     ///
     /// `serviceCPU` rides along with the rows rather than through a second entry point: it is one more
     /// thing the pill draws on the same tick, and a separate push would let the two land out of order.
-    func update(rows newRows: [IslandRow], enabled: Bool, serviceCPU: Double?) {
+    /// `cpuUnit` rides with it for the same reason and one more: it is pushed on **every** tick even
+    /// when it has not changed, because it is the only way a unit-only change (same `serviceCPU`) can
+    /// reach the readout and repaint it before the next 2s sample.
+    func update(rows newRows: [IslandRow], enabled: Bool, serviceCPU: Double?, cpuUnit: CPUUnit) {
         guard enabled else {
             hide()
             return
@@ -637,6 +640,7 @@ final class IslandPanel {
 
         rows = newRows
         self.serviceCPU = serviceCPU
+        self.cpuUnit = cpuUnit
         // The fold and the rows it renders, from the same helper the alert's own arm/end use: the card's
         // listed set is derived from `alertArmed` (`recomputeFold`), so both callers have to run exactly
         // this and only this, or one of them would show a card the other's state disagrees with.
@@ -779,8 +783,12 @@ final class IslandPanel {
 
     private var rows: [IslandRow] = []
     /// The server's own CPU for this tick, passed through to the pill with the rows. Nil = unknown:
-    /// the feature is off, or there was no honest reading.
+    /// the feature is off, or there was no honest reading. **One-core percent** — the unit the
+    /// sampler publishes; `cpuUnit` is what turns it into the drawn unit.
     private var serviceCPU: Double?
+    /// Which unit that value is drawn in, pushed with it on every tick. Stored on the panel so a pill
+    /// rebuilt after a display change comes back with the same unit.
+    private var cpuUnit: CPUUnit = .stored
     /// The prefix of the card's *listed* rows that fits the height budget, and how many were
     /// folded into the summary. Both are recomputed every tick from the current
     /// screen, and are the single source of truth for the card's layout, the
@@ -1409,9 +1417,11 @@ final class IslandPanel {
     /// changes.
     private func refreshCollapsed() {
         collapsedView?.counts = Self.statusCounts(rows)
-        // A whole percentage, because the pill draws one: the rounding, the cap at 999 and the display
-        // deadband all live in `IslandCPUView`, which is the only thing that knows what is on screen.
-        collapsedView?.cpu = serviceCPU.map { Int($0.rounded()) }
+        // The one-core percentage with its fractional part still on it, plus the unit it is drawn in:
+        // the format, the caps and the display deadbands all live in `CPUUnit`, and the view applies
+        // them. Set on every tick — the unit is what lets a menu pick repaint without a new sample.
+        collapsedView?.cpuUnit = cpuUnit
+        collapsedView?.cpu = serviceCPU
     }
 
     /// Sessions per state, for the pill. Every state is counted and every count is
@@ -2157,7 +2167,7 @@ private final class CollapsedContentView: NSView {
     ///
     /// The running slot is the one item here that costs a count and no glyph, which is why the block is
     /// 19pt narrower than it was while that slot still carried a glyph. The readout adds its gap and
-    /// its `CPU · 999%` width on top — **249** with the readout, 178 without — and it is counted here
+    /// its provisioned width on top — **258** with the readout, 178 without — and it is counted here
     /// **even when its gate is off**: this is a floor, and the tail air on a cutout-less display costs
     /// nothing, whereas making it move with the gate would need a rebuilt window for no visible gain.
     /// It is now above `islandStandInCapsuleWidth`'s 240 cap, so on a display with no cutout the floor
@@ -2185,8 +2195,10 @@ private final class CollapsedContentView: NSView {
     /// flank is wider than this once symmetry is taken into account, and this is the width its
     /// content is centred against (`leftContentInset`).
     ///
-    /// 12 + 6 + 18.565 + 8 + 62.737 = **107.301**, and `serviceCPUWidth` is 0 when the readout's gate
-    /// is off (36.565, exactly what this was before it existed).
+    /// 12 + 6 + 18.565 + 8 + 72.150 = **116.714**, and `serviceCPUWidth` is 0 when the readout's gate
+    /// is off (36.565, exactly what this was before it existed). The 72.150 is the **readout's
+    /// provision**, not one unit's typical string: it is `max` over both `CPUUnit`s (see
+    /// `cpuReadoutWidth`), so switching the unit cannot move any of these numbers.
     private static var leftContentWidth: CGFloat {
         IslandRing.diameterCap + groupGap + twoDigitCountWidth + serviceCPUWidth
     }
@@ -2206,8 +2218,9 @@ private final class CollapsedContentView: NSView {
     /// running slot's glyph moved the ring 37 → 47 in one step, and it stayed there while the flank
     /// held nothing but the ring and the count. Every move since is the readout's *existence* or its
     /// ink, never a count: 47 → 27 when it was first provisioned, → 13 when the label grew the
-    /// `CPU · ` prefix, → **11** at the 9.5pt provision (`round((130 − 107.301) / 2)`). It is a fixed
-    /// offset in every state, which is what this number is for, not the value itself.
+    /// `CPU · ` prefix, → 11 at the 9.5pt provision (`round((130 − 107.301) / 2)`), → **7** when it
+    /// grew the decimal — `round((130 − 116.714) / 2)`, the readout's width going 62.737 → 72.150. It
+    /// is a fixed offset in every state, which is what this number is for, not the value itself.
     static var leftContentInset: CGFloat {
         ((flankWidth - leftContentWidth) / 2).rounded()
     }
@@ -2226,12 +2239,18 @@ private final class CollapsedContentView: NSView {
         (UserDefaults.standard.object(forKey: "ocbar.serviceCPU") as? Bool) ?? true
     }
 
-    /// Width the readout is **provisioned** at: `CPU · ` plus three digits (`CPU · 999%`, 62.737pt at
-    /// 9.5pt medium), not the `CPU · 16%` a reading usually shows. This is the one number that may not
-    /// be optimistic — `place` zeroes the gap first, then clamps the block's leading edge (moving the
-    /// ring, the left flank's only landmark) and `masksToBounds` trims the rest, so a two-digit
-    /// provision would draw `CPU · 100%` as `CPU · 10`. It is a fixed width, not the label's own, so
-    /// the flank does not move when the value does.
+    /// Width the readout is **provisioned** at: the wider of the two units' widest strings, measured —
+    /// **`CPU · 100.0%` (72.150pt)** for `machine`, against **`CPU · 999%` (62.737pt)** for `core`.
+    /// The machine string wins by 9.413pt, so the provision is exactly what it was before the unit
+    /// became a setting: no inset, no flank and no capsule number moves. The alternative — one
+    /// provision per unit, swapped with it — is a display change the pill may not make.
+    ///
+    /// This is the one number that may not be optimistic — `place` zeroes the gap first, then clamps
+    /// the block's leading edge (moving the ring, the left flank's only landmark) and `masksToBounds`
+    /// trims the rest, so a provision at a typical reading would draw `CPU · 100.0%` as `CPU · 10`:
+    /// the `%` is in the last 12.5pt of the string. Which is also why the core unit draws a whole
+    /// number: a decimal on its three digits would measure wider than this and demand a wider flank.
+    /// It is a fixed width, not the label's own, so the flank does not move when the value does.
     static var cpuReadoutWidth: CGFloat { IslandCPUView.widestWidth }
 
     /// What the readout costs the flank when its gate is on: the gap plus the provisioned width.
@@ -2240,7 +2259,7 @@ private final class CollapsedContentView: NSView {
     private static var serviceCPUWidth: CGFloat { cpuEnabled ? cpuGap + cpuReadoutWidth : 0 }
 
     /// Where the readout starts inside the left flank: `leftContentInset` + the ring + `groupGap` +
-    /// the two-digit count + `cpuGap` — 11 + 12 + 6 + 18.565 + 8 = 55.565 → **56**. 0 when the gate
+    /// the two-digit count + `cpuGap` — 7 + 12 + 6 + 18.565 + 8 = 51.565 → **52**. 0 when the gate
     /// is off (nothing is placed there).
     ///
     /// It is a **second pinned inset**, not a third element in the ring+count block: the readout is
@@ -2273,13 +2292,15 @@ private final class CollapsedContentView: NSView {
     /// Least width the left flank needs: the running ring, the gap, that slot's two-digit count and the
     /// CPU readout with its gap, with the clearance on both sides — the same formula as the right
     /// flank's, over what this side holds.
-    /// 12 + 6 + 18.565 + 8 + 62.737 = 107.301 of content, so it rounds up to **114** (43 without the
-    /// readout).
+    /// 12 + 6 + 18.565 + 8 + 72.150 = 116.714 of content, so it rounds up to **123** (43 without the
+    /// readout) — 9pt more than the 114 the readout cost before it carried its decimal. The 72.150 is
+    /// the provision for **both** units (the machine string is the wider), so the unit setting moves
+    /// none of these numbers.
     ///
     /// It is still below the right flank's 130, which is what keeps the wings unchanged: the pill's
     /// wings stay the same width (`islandFlank` is the wider of the two, and the right's 130 still
     /// binds), so this number only sets where the content sits inside the wing. It closes on that
-    /// ceiling as the left flank gains elements — 114 leaves **16** before it would bind, and that is
+    /// ceiling as the left flank gains elements — 123 leaves **7** before it would bind, and that is
     /// the number to watch before adding another one here. What it *must* not do is overrun: `place` trims an overrun at
     /// the capsule edge silently, and a two-digit count that got trimmed would be a wrong fact.
     static let requiredLeftFlankWidth: CGFloat = {
@@ -2315,15 +2336,28 @@ private final class CollapsedContentView: NSView {
         }
     }
 
-    /// The OpenCode server's own CPU as a **whole percentage**; nil = unknown (its gate is off, or
-    /// this tick had no honest reading). Unknown means the element draws nothing *and* costs nothing,
-    /// which is why it is a `didSet` of its own rather than a fifth badge: the count's dictionary and
-    /// the server's CPU are two different facts about two different things.
-    var cpu: Int? {
+    /// The OpenCode server tree's CPU as a share of **one core** (`0…999`, fractional) — the unit the
+    /// sampler publishes in, whichever unit is drawn; nil = unknown (its gate is off, or this tick had
+    /// no honest reading). Unknown means the element draws nothing *and* costs nothing, which is why it
+    /// is a `didSet` of its own rather than a fifth badge: the count's dictionary and the server's CPU
+    /// are two different facts about two different things.
+    var cpu: Double? {
         didSet {
             guard cpu != oldValue else { return }
             applyCPU()
             needsLayout = true
+        }
+    }
+
+    /// **Which unit that one-core number is drawn in** (`CPUUnit`). Its own `didSet` rather than
+    /// riding on `cpu`'s: a unit pick republishes the *same* `Double`, so the value's equality guard
+    /// would swallow it and the pill would keep drawing the old unit's string until the next 2s
+    /// sample. Here the change repaints the readout directly. Seeded from the stored pick, so a pill
+    /// built by a screen change draws the right unit before the first tick reaches it.
+    var cpuUnit: CPUUnit = .stored {
+        didSet {
+            guard cpuUnit != oldValue else { return }
+            applyCPU()
         }
     }
 
@@ -2399,13 +2433,19 @@ private final class CollapsedContentView: NSView {
         }
     }
 
-    /// Push the server's CPU into the readout, and nothing else.
+    /// Push the server's CPU and the unit it is drawn in into the readout, and nothing else.
     ///
     /// **It must never touch `activity.running`.** The ring answers "is a session running", which is
-    /// `counts[.busy] > 0` and only that: a server at 80% with every session idle is a busy process,
-    /// not a session that is working, and a readout that turned the mark orange would make the pill's
-    /// one running statement say two things.
+    /// `counts[.busy] > 0` and only that: a server tree at half a core — `5.0%` of this machine,
+    /// `50%` of a core — with every session idle is a busy process, not a session that is working, and
+    /// a readout that turned the mark orange would make the pill's one running statement say two things.
+    ///
+    /// The unit goes in **first** and on every call, because it is what makes the same one-core
+    /// `Double` draw a different string: `IslandCPUView.unit`'s setter repaints from the value it
+    /// already holds, and the value's own equality guard then has nothing left to do. That is the
+    /// whole mechanism by which a unit-only menu pick repaints on its tick.
     private func applyCPU() {
+        cpuReadout.unit = cpuUnit
         cpuReadout.value = cpu
         cpuReadout.isHidden = cpu == nil
     }
@@ -2758,24 +2798,159 @@ private final class IslandMarkerGroup: NSView, IslandFlankElement {
 
 // MARK: - The server's CPU
 
-/// The OpenCode **server** process's CPU, in the collapsed pill's left flank, labelled —
-/// **`CPU · 16%`**.
+/// **What the readout's percentage is a percentage *of*.** The sampler publishes **one** number:
+/// the tree's share of **one core**, `0…999`. Every value that reaches the pill is in that unit, and
+/// this enum is the only place that turns it into ink — `machine` divides by the logical core count
+/// and draws one decimal, `core` draws the share itself as a whole number.
 ///
-/// **The prefix ships.** The flank also carries the running count, and an unlabelled `16%` beside
+/// **Why it is a setting.** "50%" means two very different loads depending on the denominator: a
+/// fifth of this 10-core machine, or half of one core — and the second is the number somebody
+/// watching a single-threaded build thinks in. The question is the user's, so it is a menu pick. What
+/// may **not** move with it is the pill: the flank is provisioned for the wider of the two strings
+/// (`IslandCPUView.widestWidth`), which is why the formats below differ and why neither may be
+/// widened without widening the pill.
+enum CPUUnit: String, CaseIterable {
+
+    /// Percentage of the whole machine: every logical core busy reads `100.0`.
+    case machine
+    /// Percentage of one core: `100` is one core saturated, and a tree can read past it.
+    case core
+
+    /// **Default `machine`** — the unit the setting was added with, and the one the pill is already
+    /// provisioned at (`CPU · 100.0%` is the widest string either unit draws, so the default costs
+    /// nothing in geometry). Stored beside the readout's on/off gate (`ocbar.serviceCPU`), and read by
+    /// the pill and the menu from here so the two cannot disagree about the key or the default.
+    static let defaultsKey = "ocbar.cpuUnit"
+
+    static var stored: CPUUnit {
+        guard let raw = UserDefaults.standard.string(forKey: defaultsKey),
+              let unit = CPUUnit(rawValue: raw) else { return .machine }
+        return unit
+    }
+
+    /// Menu wording, sentence case like every other pick in the dropdown. The submenu's parent
+    /// ("Server CPU") already names the subject, so the items only have to name the denominator.
+    var displayName: String {
+        switch self {
+        case .machine: return "Percent of machine"
+        case .core: return "Percent of one core"
+        }
+    }
+
+    /// The machine denominator, read once from the same process info the sampler's one-core
+    /// contract is stated against: one machine point is `cores` one-core points.
+    static let cores = Double(max(1, ProcessInfo.processInfo.activeProcessorCount))
+
+    /// The published one-core share, in this unit's own scale.
+    func scaled(_ oneCorePercent: Double) -> Double {
+        switch self {
+        case .core: return oneCorePercent
+        case .machine: return oneCorePercent / Self.cores
+        }
+    }
+
+    /// The highest value this unit can draw, and therefore the value the flank is provisioned at.
+    /// `core`'s ceiling is the sampler's own clamp (`999`, three digits); `machine`'s `100.0` is the
+    /// point where every logical core is busy. Both are the hardware's ceiling, not a four-digit
+    /// allowance, so the pill can never draw a percentage the machine cannot produce.
+    var cap: Double {
+        switch self {
+        case .machine: return 100.0
+        case .core: return 999
+        }
+    }
+
+    /// How still the number is held: the shown value only moves when the target is this far from it.
+    ///
+    /// **Both cases are the same physical statement — 3 one-core points — and both are three display
+    /// steps**, because `shown` is held at the unit's own precision (`roundedToStep`). Neither number
+    /// is arbitrary: the rule is unchanged from the readout's first version, when the text moved in
+    /// whole one-core percent and the constant *was* `3`. One machine point on this 10-core box is 10
+    /// one-core points, so `0.3` machine percent is those same 3. Both failures it exists to prevent
+    /// are next door: `30` one-core points (or `3.0` machine percent) would freeze the readout — an
+    /// idle server would never move it — and `1`/`0.1` would accept every tick's drift and rewrite
+    /// the digit each time, which reads as a glitch rather than a measurement.
+    var deadband: Double {
+        switch self {
+        case .machine: return 0.3
+        case .core: return 3
+        }
+    }
+
+    /// Where the readout stops being quiet — **half a core, whichever unit is drawn**: `50` one-core
+    /// percent, `50 / cores` machine percent (**5.0** here, 6.25 on an 8-core Mac). That is exactly
+    /// what the one-core `50` said, so the ink starts where it always did: "this tree is using more
+    /// than half of one core". A fixed machine percent that "reads as busy" (say 10) was rejected
+    /// because it is not the same statement on two machines — a tenth of a core on an 8-core box, a
+    /// quarter of one here — and this readout exists to be comparable at a glance. The price is that
+    /// the machine case is machine-dependent *by rule*: it reads the same `cores` the machine unit
+    /// divides by.
+    var attentionThreshold: Double {
+        switch self {
+        case .machine: return 50 / Self.cores
+        case .core: return 50
+        }
+    }
+
+    /// The value the label will actually draw: rounded to the unit's own step — a whole number for
+    /// `core`, a tenth for `machine`. The readout holds this rather than the fraction, so its
+    /// deadband counts *display steps* (three in either unit) and its tint is decided from the same
+    /// number the text shows, instead of from a fraction the text has already rounded away.
+    func roundedToStep(_ value: Double) -> Double {
+        switch self {
+        case .machine: return (value * 10).rounded() / 10
+        case .core: return value.rounded()
+        }
+    }
+
+    /// The string for one published value, in this unit's format.
+    ///
+    /// **Why the formats differ.** `machine` draws one decimal because 100 points of scale is coarse:
+    /// a mostly-idle server has to stay a visible `0.3%`/`0.5%` rather than a `0` or a `1` that reads
+    /// as a rounding error. `core` draws a whole number because its scale already runs to three
+    /// digits (`999`), so resolution is not the problem — and a decimal on those three digits
+    /// (`999.0%`) would be wider than the machine's widest string and would therefore widen the
+    /// flank's shared provision, a display change this pill may not make. The provision is the wider
+    /// of the two (`CPU · 100.0%`), and neither format may grow into a string that would be trimmed.
+    func text(forScaled value: Double) -> String {
+        switch self {
+        case .machine: return String(format: "CPU · %.1f%%", value)
+        case .core: return String(format: "CPU · %.0f%%", value)
+        }
+    }
+
+    /// The same string from the raw, one-core value the pill is handed.
+    func string(_ oneCorePercent: Double?) -> String {
+        guard let oneCorePercent else { return "" }
+        return text(forScaled: min(scaled(oneCorePercent), cap))
+    }
+}
+
+/// The OpenCode **server tree's** CPU — the server process and the descendants it spawns — in the
+/// collapsed pill's left flank, labelled: **`CPU · 1.6%`** (a share of the whole machine, one
+/// decimal) or **`CPU · 16%`** (a share of one core, a whole number), depending on the `CPUUnit` the
+/// user picked. One published number in, one of those two strings out — see `CPUUnit` for why the
+/// formats differ and why the provision is the wider of them.
+///
+/// **The number this view holds is always one-core percent.** `ServiceCPUSampler` publishes the
+/// tree's raw share of a single core, `0…999`, already smoothed and clamped; `value` is exactly
+/// that, in every unit. Where the number comes from is `session-monitoring.md`'s business.
+///
+/// **The prefix ships.** The flank also carries the running count, and an unlabelled `1.6%` beside
 /// it asked the reader to guess which number was the sessions and which the process; the earlier
-/// version left `CPU` out on the grounds that it is 18.8pt of ink to label a 24.8pt value, and the
+/// version left `CPU` out on the grounds that it is 24.6pt of ink to label a 29.0pt value, and the
 /// maintainer rejected that trade — a readout nobody can name is not a readout. So the label is
 /// spent, `CPU` is capitals, and the separator is `·`
 /// (U+00B7 middle dot) rather than a dash: one space either side, and nothing that could read as a
 /// minus sign against a percentage.
 ///
 /// It stays **one run, one tint** — no dimmer prefix. Two tones in a 9.5pt string that never exceeds
-/// 62.7pt would cost a second attributed run and buy a contrast the eye cannot resolve at this
+/// 72.1pt would cost a second attributed run and buy a contrast the eye cannot resolve at this
 /// size; the prefix is part of the reading, not a caption for it.
 ///
 /// The `%` is still not optional, and for the same reason it always was: the pill already carries
-/// bare counts to the left of this, so a trailing `16` with no sign would be a third count. The
-/// `%` is what says the number is a measurement.
+/// bare counts to the left of this, so a trailing `1.6` (or `16`) with no sign would be a third
+/// count. The `%` is what says the number is a measurement.
 ///
 /// No glyph, and never a tint from the pill's status colours: one mark per flank is the ring, and
 /// colour on this flank belongs to statuses.
@@ -2783,34 +2958,31 @@ private final class IslandMarkerGroup: NSView, IslandFlankElement {
 /// **It never drives the ring.** High CPU is not a running session — see
 /// `CollapsedContentView.applyCPU()`.
 ///
-/// Only the `service.json` pid is sampled, so CPU spent in the server's own tool subprocesses
-/// (`bash`, `git`, a test run) is **not** counted here.
+/// The number is the whole process tree, so CPU spent in the server's own tool subprocesses
+/// (`bash`, `git`, a test run) **is** counted here — a session in the middle of a build shows the
+/// build. A child that daemonizes out of the tree stops contributing.
 private final class IslandCPUView: NSView, IslandFlankElement {
 
     /// 9.5pt, medium, tabular: smaller than the 11pt counts because it is a detail *about* them rather
     /// than a peer, and monospaced digits so it cannot jitter as the value changes.
     static let font = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .medium)
 
-    /// The percentage at which the readout stops being quiet. Not a status colour: this is a readout,
-    /// and the pill's colours belong to statuses (and the ring) — anything other than plain white here
-    /// would be a third vocabulary. So "attention" is white at its normal weight (α0.92) instead of
-    /// the quiet α0.50.
-    static let attentionThreshold = 50
-
-    /// How still the number is held, in whole percent: the shown integer only moves when the target is
-    /// at least this far from it. The smoothed value is already an EMA, but a point or two of drift
-    /// would still rewrite the text every few ticks, which reads as a glitch rather than a measurement.
-    private static let deadband = 3
-
-    /// The widest the readout can be: `CPU · ` plus **three digits**, the value the flank is
-    /// provisioned for (`CollapsedContentView.cpuReadoutWidth`). Measured through
-    /// `islandLabelWidth`, so the digits cannot be shaved and the geometry cannot drift from what
-    /// is drawn. The prefix is in here because it is drawn: it is part of the string, not a label
-    /// the layout may clip out of the provision.
+    /// **The widest string either unit can draw**, measured: `CPU · 100.0%` — 72.150pt at 9.5pt
+    /// medium — against the core unit's `CPU · 999%` at 62.737pt. The machine string wins, so the
+    /// readout's provision *and therefore the whole pill* are exactly what they were before the
+    /// setting existed; a unit that needed more than this would be a display change and is not
+    /// allowed (see `CPUUnit.text(forScaled:)` for why the core unit has no decimal).
+    ///
+    /// Measured through `islandLabelWidth`, so the digits cannot be shaved and the geometry cannot
+    /// drift from what is drawn. The prefix is in here because it is drawn: it is part of the string,
+    /// not a label the layout may clip out of the provision. The provision lives in
+    /// `CollapsedContentView.cpuReadoutWidth`; this constant is the measurement it is made of.
     static let widestWidth: CGFloat = {
-        let label = NSTextField(labelWithString: "CPU · 999%")
-        label.font = font
-        return islandLabelWidth(for: label)
+        CPUUnit.allCases.map { unit -> CGFloat in
+            let label = NSTextField(labelWithString: unit.text(forScaled: unit.cap))
+            label.font = font
+            return islandLabelWidth(for: label)
+        }.max() ?? 0
     }()
 
     /// How far the label is raised above the box's centre, in points. A 9pt cap band sits 0.2709pt
@@ -2820,17 +2992,32 @@ private final class IslandCPUView: NSView, IslandFlankElement {
     /// The eye reads 0.19. Same class of correction as `IslandActivityView.pillMarkDrop` (0.5), opposite sign.
     private static let labelRaise: CGFloat = 0.1875
 
-    /// The percentage the caller published, as a whole number; nil = unknown.
-    var value: Int? {
+    /// The **one-core** share the caller published (`0…999`, fractional); nil = unknown. The unit is
+    /// not part of the value — it is `unit` below, and only the drawing changes when it does.
+    var value: Double? {
         didSet {
             guard value != oldValue else { return }
             updateShown()
         }
     }
 
-    /// The integer actually drawn — the one the deadband holds still, and the one the colour is
-    /// decided from, so the text and its tint can never be about different numbers.
-    private var shown: Int? {
+    /// Which unit the readout draws, and a change here **repaints on its own**. The caller pushes the
+    /// same one-core `Double` when only the unit moved, so `value`'s equality guard would swallow it
+    /// and the old unit's string would stay up until the next 2s sample; `repaintInNewUnit` is what
+    /// makes the menu pick land on this tick. Seeded from the stored pick so a view built by a screen
+    /// change already draws the right unit.
+    var unit: CPUUnit = .stored {
+        didSet {
+            guard unit != oldValue else { return }
+            repaintInNewUnit()
+        }
+    }
+
+    /// The value actually drawn — **in `unit`'s scale and at its precision** (a whole one-core percent,
+    /// or machine percent to a tenth), held that way so the deadband counts display steps and the tint
+    /// is decided from the number the text shows, so the text and its tint can never be about different
+    /// numbers.
+    private var shown: Double? {
         didSet {
             guard shown != oldValue else { return }
             applyShown()
@@ -2876,17 +3063,39 @@ private final class IslandCPUView: NSView, IslandFlankElement {
             shown = nil
             return
         }
-        // Three digits is the whole vocabulary: a pid reuse or a bogus delta can produce a number that
-        // would draw wider than the flank is provisioned for, and that width would be trimmed.
-        let capped = min(target, 999)
-        if let current = shown, abs(capped - current) < Self.deadband { return }
+        // The cap, the step and the deadband all belong to the unit that is being drawn, because
+        // `shown` is held in that unit's scale and at that unit's precision: a pid reuse or a bogus
+        // delta must not draw a string wider than the flank is provisioned for, and a comparison
+        // across two units would hold the wrong amount still.
+        let capped = unit.roundedToStep(min(unit.scaled(target), unit.cap))
+        if let current = shown, abs(capped - current) < unit.deadband { return }
         shown = capped
     }
 
+    /// Re-draw what is already held, in a different unit. The held number is in the *old* unit's
+    /// scale, so it is not a placeholder for the new one: drop it (which clears the string, so no
+    /// frame can show the previous unit) and apply the target again from scratch — deadband included,
+    /// because the first frame in a new unit is not a step in the old one.
+    private func repaintInNewUnit() {
+        shown = nil
+        updateShown()
+    }
+
     private func applyShown() {
-        label.stringValue = shown.map { "CPU · \($0)%" } ?? ""
+        // **The decimal separator is always `.`.** `String(format:)` takes no locale, so a machine
+        // whose language uses a decimal comma still draws `1.6%` — the dot is part of the string, not
+        // a formatting preference, and a `,` beside a `·` separator would be two marks doing the same
+        // job. Tabular digits are what keep the width from moving as the value changes. The format
+        // itself (`1.6` vs `16`) is `CPUUnit`'s, per unit.
+        label.stringValue = shown.map { unit.text(forScaled: $0) } ?? ""
         label.isHidden = shown == nil
-        label.textColor = NSColor.white.withAlphaComponent((shown ?? 0) >= Self.attentionThreshold ? 0.92 : 0.50)
+        // **Attention is ink, not colour.** The pill's colours belong to statuses (and the ring), so
+        // anything but plain white here would be a third vocabulary: the readout is white at its
+        // normal weight (α0.92) once it is drawing `CPUUnit.attentionThreshold` or more — half a core
+        // in whichever unit is drawn (`5.0` machine percent here, `50` one-core percent) — and the
+        // quiet α0.50 below it. `shown` is in the same unit as that threshold, so the ink and the
+        // number cannot be about different amounts of work.
+        label.textColor = NSColor.white.withAlphaComponent((shown ?? 0) >= unit.attentionThreshold ? 0.92 : 0.50)
         needsLayout = true
     }
 }
@@ -4577,11 +4786,12 @@ final class IslandHost {
 
     /// Push the same rows to every screen's island. Any capping happens inside
     /// each panel, against its own screen's budget.
-    func update(rows: [IslandRow], enabled: Bool, serviceCPU: Double?) {
+    func update(rows: [IslandRow], enabled: Bool, serviceCPU: Double?, cpuUnit: CPUUnit) {
         lastRows = rows
         lastEnabled = enabled
         lastServiceCPU = serviceCPU
-        for panel in panels { panel.update(rows: rows, enabled: enabled, serviceCPU: serviceCPU) }
+        lastCPUUnit = cpuUnit
+        for panel in panels { panel.update(rows: rows, enabled: enabled, serviceCPU: serviceCPU, cpuUnit: cpuUnit) }
     }
 
     /// Collapse every island — the menubar calls this as its menu opens, so no island anywhere sits in
@@ -4670,6 +4880,7 @@ final class IslandHost {
     private var lastRows: [IslandRow] = []
     private var lastEnabled = false
     private var lastServiceCPU: Double?
+    private var lastCPUUnit: CPUUnit = .stored
     private var observer: NSObjectProtocol?
 
     private func screensDidChange() {
@@ -4694,6 +4905,6 @@ final class IslandHost {
             return panel
         }
         // Re-apply the current state so a rebuild does not blank the islands.
-        for panel in panels { panel.update(rows: lastRows, enabled: lastEnabled, serviceCPU: lastServiceCPU) }
+        for panel in panels { panel.update(rows: lastRows, enabled: lastEnabled, serviceCPU: lastServiceCPU, cpuUnit: lastCPUUnit) }
     }
 }
