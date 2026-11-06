@@ -253,10 +253,10 @@ class SessionMonitor {
     var onTransition: ((SessionStatus, String, Int32?, String?) -> Void)?
     var onDismiss: ((String) -> Void)?
 
-    /// A root session is shown while its work is active/waiting, or if it has
-    /// been viewed and the later of its last view and last activity is newer
-    /// than this window. 12h: a session parked overnight should still be in the
-    /// island when the user comes back to it.
+    /// Which directories get asked for pending forms/permissions: those of a session whose work
+    /// is active or whose last activity is newer than this window, plus any session already
+    /// waiting. 12h: a session parked overnight should still surface its form on return. This
+    /// does not gate what is listed — a viewed root stays listed however old.
     private static let recentWindow: TimeInterval = 43200
 
     init(onStateChange: @escaping (AppState) -> Void) {
@@ -362,8 +362,6 @@ class SessionMonitor {
             children[parent, default: []].append(id)
         }
 
-        let now = Date().timeIntervalSince1970 * 1000
-
         var sessions: [SessionInfo] = []
         for s in sessionList {
             guard let id = s["id"] as? String,
@@ -396,9 +394,8 @@ class SessionMonitor {
 
             let updated = (time["updated"] as? NSNumber)?.doubleValue ?? 0
             let created = (time["created"] as? NSNumber)?.doubleValue ?? 0
-            let lastSeen = max(viewed ?? 0, updated)
-            let recentlySeen = now - lastSeen <= Self.recentWindow * 1000
-            guard isWaiting || isBusy || ((viewed ?? 0) > 0 && recentlySeen) else { continue }
+            // No recency window: a root stays listed once it has been viewed, however long ago.
+            guard isWaiting || isBusy || (viewed ?? 0) > 0 else { continue }
 
             guard let pid = sessionIDToPID[id] else { continue }
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
