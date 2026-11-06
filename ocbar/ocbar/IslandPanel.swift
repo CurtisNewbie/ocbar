@@ -306,6 +306,16 @@ func islandRowHeight(lines: Int) -> CGFloat {
     islandRowOneLineHeight + CGFloat(max(lines, 1) - 1) * islandRowHeightPerExtraLine
 }
 
+/// Air a list of `count` session rows carries **between** its rows: `(count - 1) × gap`, never
+/// negative, so a single row (and the empty line that stands in for none) pays nothing at all.
+/// One source of truth for the same three readers `islandRowHeight` has — the card's layout, the
+/// card's own height, and the height budget — because a gap the frame pays and the stack does not
+/// is a clipped row, and the reverse is a strip of the card's background left open under the
+/// footer.
+func islandRowGaps(count: Int, gap: CGFloat) -> CGFloat {
+    CGFloat(max(count - 1, 0)) * gap
+}
+
 /// A row's tooltip for the subagents its session is running, or nil when there
 /// are none.
 ///
@@ -423,6 +433,18 @@ struct IslandListBudget {
     /// Where the rows start, so nothing hides under the notch.
     let contentTop: CGFloat
     let bottomPadding: CGFloat
+    /// Air between two adjacent session rows, and **only** there — a list of n rows pays
+    /// `(n - 1)` of these (`islandRowGaps`), never one above the first row (the top edge has
+    /// `contentTop` for that) and never one below the last (the footer follows the last row
+    /// directly, which is what keeps the `+k more` footnote hanging off the list it closes).
+    ///
+    /// It is part of the budget, not a detail of the layout, because the card's height is
+    /// `contentTop + rows + gaps + chrome`. Counting the rows and not the gaps would leave the
+    /// frame shorter than `layout()` and clip the last row; and `visibleCount` would call a list
+    /// that the gaps alone push past the edge a fit — one row too many, the exact off-by-one the
+    /// budget exists to prevent. The collapsed pill is not a list of these rows at all, so this is
+    /// the expanded card's number (`IslandPanel.islandRowGap`) and only that.
+    let rowGap: CGFloat
     let summaryRowHeight: CGFloat
     /// Height of the card's footer row — `summaryRowHeight`, because the gear makes it permanent. Chrome
     /// like the folded summary, so it comes off the list budget the same way: a card always owes one row's
@@ -460,8 +482,11 @@ struct IslandListBudget {
         var used: CGFloat = 0
         var count = 0
         for height in heights {
-            if count > 0, used + height > rowBudget { break }
-            used += height
+            // A row after the first costs its height *and* the gap above it, because both are what
+            // the card will spend on it — see `rowGap`.
+            let cost = count > 0 ? rowGap + height : height
+            if count > 0, used + cost > rowBudget { break }
+            used += cost
             count += 1
         }
         return count
@@ -470,7 +495,9 @@ struct IslandListBudget {
     /// Total card height for a set of visible rows. The card reports the same
     /// number from the views it holds, so frame and layout agree.
     func cardHeight(forRowHeights heights: [CGFloat], folded: Bool) -> CGFloat {
-        var height = contentTop + heights.reduce(0, +) + actionRowHeight
+        var height = contentTop + heights.reduce(0, +)
+            + islandRowGaps(count: heights.count, gap: rowGap)
+            + actionRowHeight
         if folded { height += summaryRowHeight }
         return height + bottomPadding
     }
@@ -892,6 +919,25 @@ final class IslandPanel {
     /// edge, which is the argument the alert's card always made, so the bottom is one step for every card
     /// and the conditional made the same number with a name for a case that no longer exists.
     private let bottomPadding: CGFloat = 8
+    /// Air between two adjacent session rows in the **expanded** card, so a list of back-to-back rows
+    /// reads as a list rather than as stripes. It exists only *between* rows: nothing above the first
+    /// (the top edge already pays `islandExpandedTopPadding` plus the cutout) and nothing below the last
+    /// (the footer follows it directly, which is what keeps the folded `+k more` line a footnote of the
+    /// list it closes instead of a second block of its own).
+    ///
+    /// **6, against rows of 30/44/58 and the card's 8pt unit.** The range is bounded on both sides by the
+    /// grouping the list has to read at: the gap *inside* a group must be smaller than the 8 between the
+    /// group and the card's edge, or every row gets an edge of its own and a five-row list becomes five
+    /// one-row cards; and it must still separate a 58pt row from its neighbour, which is where it stops
+    /// being invisible. So 8 is rejected outright (it *is* the edge, and the card's padding rhythm stops
+    /// saying which gap means what), and 4 is rejected as too quiet at the three-line row — it survives
+    /// only at 30. 6 is the one step between them: 6 at the pixel, 2 clear of the thing it must not
+    /// equal, and it costs a full six-row list 30pt, still inside the budget the fold already keeps.
+    ///
+    /// **The expanded value only.** The collapsed card's rows are the same views (the pill just hides
+    /// them), so this is pushed to the card as 0 while folded — see `applyAppearance` — and the collapsed
+    /// geometry, which `hoverLatched` and `islandExpandedTopPadding` both reason about, does not move.
+    private let islandRowGap: CGFloat = 6
     private let expandedCornerRadius: CGFloat = 18
     /// Fake-notch capsule width for a display with no cutout. The rule is `islandStandInCapsuleWidth`
     /// — a share of the screen's width, floored and capped so it stays a pill, and floored again by
@@ -1238,6 +1284,7 @@ final class IslandPanel {
             visibleFrame: metrics.screen.visibleFrame,
             contentTop: contentTop(for: metrics),
             bottomPadding: bottomPadding,
+            rowGap: islandRowGap,
             summaryRowHeight: summaryRowHeight,
             actionRowHeight: actionRowHeight,
             tallestRowHeight: tallestRowHeight,
@@ -1298,6 +1345,8 @@ final class IslandPanel {
         guard visible, expandedState, let card else { return }
         let metrics = currentMetrics()
         card.contentTop = contentTop(for: metrics)
+        // Open, so the list keeps its gap: this path only ever runs for a card already expanded.
+        card.rowGap = islandRowGap
         // One step on the bottom in both states — the footer holds the last row off the edge either way —
         // so this is the same number `applyAppearance` pushes, kept here because a card can also be open
         // while this runs.
@@ -1537,6 +1586,10 @@ final class IslandPanel {
         // Flush against the top edge: the card's own `draw` squares the top corners on every
         // display — see there for why the shape does not vary with the screen.
         card.contentTop = expanded ? contentTop(for: metrics) : rowInset
+        // The gap is the expanded card's alone — the same rule as the top step above, and for the same
+        // reason: the collapsed card still holds these rows, so anything that moves them is a change to
+        // the pill's geometry, which `hoverLatched` is measured in. See `islandRowGap`.
+        card.rowGap = expanded ? islandRowGap : 0
         // One step on the bottom in both states: the footer (`actionRowHeight`) sits between the last
         // session row and the edge whether or not an alert's `Hide` is in it, so the bottom no longer has
         // an expanded-only step to mirror the top's.
@@ -1917,6 +1970,19 @@ private final class IslandCardView: NSView {
     }
     var rowInset: CGFloat = 8
     var bottomPadding: CGFloat = 8
+    /// Air between two adjacent session rows — **between them only**, so n rows carry
+    /// `islandRowGaps(count: n, gap: rowGap)` of it (`contentHeight` and `layout()` both take their
+    /// number from that one function).
+    ///
+    /// Defaults to 0 and is pushed back to 0 while the card is collapsed (`IslandPanel.applyAppearance`),
+    /// because the rows live here in both states — the collapsed pill hides them, it does not remove
+    /// them — and the collapsed card's own geometry is load-bearing: its rows keep `rowInset` (8) so they
+    /// sit inside the collapsed rect, which is what `hoverLatched` reasons about (see
+    /// `islandExpandedTopPadding`). Moving a hidden row would still be invisible on screen, and that is
+    /// exactly how it would eventually be read as the visible one.
+    var rowGap: CGFloat = 0 {
+        didSet { if rowGap != oldValue { needsLayout = true } }
+    }
     var contentTop: CGFloat = 0 {
         didSet { if contentTop != oldValue { needsLayout = true } }
     }
@@ -1955,6 +2021,9 @@ private final class IslandCardView: NSView {
     /// has one**.
     var contentHeight: CGFloat {
         var total = contentTop + rowViews.reduce(0) { $0 + height(of: $1) }
+        // The air between the rows, which is the same sum `layout()` steps over between frames — the
+        // frame and the stack of rows cannot disagree about a mixed-height list, gaps included.
+        total += islandRowGaps(count: rowViews.count, gap: rowGap)
         // The line is counted only when it is on the card — `emptyStateView != nil`, the same predicate
         // `layout()` places it under — and not merely when the row list is empty. Those two diverge for as
         // long as a card can exist without its line, and counting a line `layout()` will not place is the
@@ -2018,11 +2087,15 @@ private final class IslandCardView: NSView {
         let inset = rowInset
         let width = max(0, bounds.width - inset * 2)
         var y = contentTop
-        for view in rowViews {
+        for (index, view) in rowViews.enumerated() {
             // Each row is as tall as the lines it shows, so a list mixes heights.
             let h = height(of: view)
             view.frame = NSRect(x: inset, y: y, width: width, height: h)
             y += h
+            // Between rows, and only there: the last row is followed straight by the empty line (never
+            // both — the line stands in for the rows), the `+k more` footnote, or the footer, and none
+            // of them is a session the list is separating.
+            if index < rowViews.count - 1 { y += rowGap }
         }
         if rowViews.isEmpty, let emptyStateView {
             // The line that stands in for an empty list, in the rows' own column — so its text starts
