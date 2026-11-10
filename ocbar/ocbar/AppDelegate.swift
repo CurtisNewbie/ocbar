@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import UserNotifications
 
 // <menubar-title-shape>
@@ -38,7 +39,7 @@ func aggregateSummary(statuses: [String]) -> String {
 }
 // </menubar-title-shape>
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlayerDelegate {
     private var statusItem: NSStatusItem!
     private var monitor: SessionMonitor!
     /// The point size the status glyphs — and therefore the running mark standing among them — are drawn
@@ -807,7 +808,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // The alert played alongside the bubble. "System alert" uses the user's
     // configured alert sound (NSSound.beep()); the rest are the macOS system
-    // sounds, which NSSound looks up by their capitalized name.
+    // sounds in /System/Library/Sounds, which NSSound also looks up by their
+    // capitalized name.
     private enum AlertSound: String, CaseIterable {
         case off
         case system
@@ -841,6 +843,85 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             default: NSSound(named: rawValue.capitalized)?.play()
             }
         }
+
+        /// The full-scale target, in linear sample units. Just under 1.0 because the Int16 round-trip
+        /// below pushes a sample at exactly full scale one step past it, which clips — 0.94 is
+        /// -0.5 dBFS and leaves that margin.
+        private static let targetPeak: Float = 0.94
+
+        /// Rendered alerts, keyed by case. The decode and encode cost a few milliseconds and the
+        /// same sound rings again on the next reminder, so each one is paid for once.
+        private static var rendered: [AlertSound: Data] = [:]
+
+        /// This case's waveform, amplified to just under full scale and encoded as 16-bit PCM WAV —
+        /// the form `AVAudioPlayer(data:)` opens.
+        ///
+        /// Amplifying the file is the point: the bundled alerts leave 5–15 dB of headroom unused
+        /// (`Tink` peaks at -8.8 dBFS, `Frog` -15.3, `Hero` -5.4), and claiming it costs nothing
+        /// outside our own playback. Raising the output device instead would move a level the user
+        /// set for every other app, and a mute has to stay a mute.
+        ///
+        /// `nil` where there is nothing to amplify: `.off`, and `.system`, whose beep is synthesised
+        /// by the OS and has no file. Also `nil` on a failure — no file, an empty read, a peak
+        /// already at or above the target — so the caller falls back to the plain sound rather than
+        /// turning a broken read into a silent alert.
+        func amplified() -> Data? {
+            switch self {
+            case .off, .system: return nil
+            default: break
+            }
+            if let cached = AlertSound.rendered[self] { return cached }
+            guard let data = AlertSound.render(self) else { return nil }
+            AlertSound.rendered[self] = data
+            return data
+        }
+
+        private static func render(_ sound: AlertSound) -> Data? {
+            let url = URL(fileURLWithPath: "/System/Library/Sounds/\(sound.rawValue.capitalized).aiff")
+            guard let file = try? AVAudioFile(forReading: url) else { return nil }
+            let capacity = AVAudioFrameCount(file.length)
+            guard capacity > 0, let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: capacity),
+                  (try? file.read(into: buffer)) != nil, let channels = buffer.floatChannelData,
+                  buffer.frameLength > 0 else { return nil }
+
+            let channelCount = Int(buffer.format.channelCount)
+            let frames = Int(buffer.frameLength)
+            var peak: Float = 0
+            for channel in 0..<channelCount {
+                for frame in 0..<frames { peak = max(peak, abs(channels[channel][frame])) }
+            }
+            guard peak > 0, peak < targetPeak else { return nil }
+
+            let scale = targetPeak / peak
+            let sampleRate = UInt32(buffer.format.sampleRate)
+            let blockAlign = channelCount * 2
+            var data = Data(capacity: 44 + frames * blockAlign)
+            func append<T: FixedWidthInteger>(_ value: T) {
+                withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+            }
+            // RIFF/WAVE, 44 bytes: PCM chunk, then the interleaved samples. Hand-built because the
+            // player wants a self-describing byte stream and there is nothing here worth a writer.
+            data.append(contentsOf: Array("RIFF".utf8))
+            append(UInt32(36 + frames * blockAlign))
+            data.append(contentsOf: Array("WAVEfmt ".utf8))
+            append(UInt32(16))
+            append(UInt16(1))
+            append(UInt16(channelCount))
+            append(sampleRate)
+            append(sampleRate * UInt32(blockAlign))
+            append(UInt16(blockAlign))
+            append(UInt16(16))
+            data.append(contentsOf: Array("data".utf8))
+            append(UInt32(frames * blockAlign))
+            for frame in 0..<frames {
+                // Interleaved by hand: the buffer is planar, the file is not.
+                for channel in 0..<channelCount {
+                    let sample = max(-1, min(1, channels[channel][frame] * scale))
+                    append(Int16((sample * 32767).rounded()))
+                }
+            }
+            return data
+        }
     }
 
     private var alertSound: AlertSound {
@@ -871,9 +952,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard all.indices.contains(sender.tag) else { return }
         let selected = all[sender.tag]
         UserDefaults.standard.set(selected.rawValue, forKey: alertSoundKey)
-        // Preview the pick immediately so the user hears what they chose; .off is a no-op.
-        selected.play()
+        // Preview the pick immediately so the user hears what they chose; .off is a no-op. The
+        // selection is saved above, so the alert is the preview.
+        playAlert()
         render(currentState, forceMenuRefresh: true)
+    }
+
+    // MARK: - Alert playback
+
+    /// The player alive right now. `AVAudioPlayer` keeps the bytes it was handed for as long as it
+    /// is retained, so it is held here for the length of the ring and dropped in the delegate
+    /// callback that reports the end.
+    private var alertPlayer: AVAudioPlayer?
+
+    /// Rings the alert the user picked. `.off` is a no-op; everything else goes through the
+    /// amplified waveform, falling back to the plain sound where none could be rendered — the beep
+    /// has no file, and a sound file that cannot be read must still be heard.
+    private func playAlert() {
+        let chosen = alertSound
+        guard chosen != .off else { return }
+        guard let data = chosen.amplified(), let player = try? AVAudioPlayer(data: data) else {
+            chosen.play()
+            return
+        }
+        // 1.0 because the waveform has already been raised to the ceiling; anything lower would
+        // give back the quiet this exists to fix.
+        player.volume = 1.0
+        player.delegate = self
+        alertPlayer = player
+        player.play()
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        // Only the player still held may release it: an alert that finished after a later one took
+        // the hold would otherwise cut that one short.
+        if player === alertPlayer { alertPlayer = nil }
     }
 
     // MARK: - Island
@@ -1229,7 +1342,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // rings whenever one of them is going to show something. `.off` is the
         // default, so a user who never picked a sound is unaffected.
         if bubbleEnabled || islandEnabled {
-            alertSound.play()
+            playAlert()
         }
     }
 

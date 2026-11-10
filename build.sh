@@ -18,6 +18,7 @@ swiftc \
   "$SRC/AppDelegate.swift" \
   "$SRC/main.swift" \
   -framework AppKit \
+  -framework AVFoundation \
   -framework UserNotifications \
   -o "$DIR/ocbar/ocbar_bin"
 
