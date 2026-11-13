@@ -126,8 +126,9 @@ None beyond `AGENTS.md` — the app's build trap and the island's invariants are
 
 ## Further Notes
 
-- The question form's own title ("Questions") is boilerplate and never rendered; a field's short title
-  is the block's heading, falling back to the field's full text.
+- The question form's own title ("Questions") is boilerplate and never rendered. A field's short title is
+  the block's dim overline when the field also carries its question text, and that text is the body
+  under it; a field with no question text draws its title as the body, and one with neither draws its key.
 - The card's list budget already owns how tall the card may get; the block's scrolling comes out of
   the same budget rather than a second one.
 - A TUI plugin is a delivery vehicle this app already has: the build installs the session bridge into
