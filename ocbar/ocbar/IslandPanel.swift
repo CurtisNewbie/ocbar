@@ -5604,11 +5604,12 @@ private let islandQuestionOptionTextInset: CGFloat = 6
 /// Most the options may take before they scroll. The card's list budget owns how tall the card may get
 /// and pays the block's whole height (`IslandListBudget.extraContentHeight`); this is the block's own
 /// cap inside that, and the budget's clamp (`IslandPanel.questionBlockRoom`) may take it lower still.
-/// **Four two-line options** — an ordinary question's three plus its `Other…` — work out as
-/// 4 × (2 × 8 padding + 15 label + 2 × 14 detail) = 236, so an ordinary form shows every option and
-/// nothing is half-clipped before the scrollbar takes over.
+/// **Four two-line rows** work out as 4 × (2 × 8 padding + 15 label + 3 gap + 2 × 14 detail) = 248, so
+/// an ordinary form — three options carrying a description plus its one-line `Other…` (217) — shows
+/// every option, and one more described option still fits before the scrollbar takes over.
 private let islandQuestionOptionsMaxHeight: CGFloat =
-    4 * (islandQuestionOptionVerticalPadding * 2 + islandQuestionOptionLabelLineHeight + 2 * islandQuestionSecondaryLineHeight)
+    4 * (islandQuestionOptionVerticalPadding * 2 + islandQuestionOptionLabelLineHeight
+         + islandQuestionOptionLabelGap + 2 * islandQuestionSecondaryLineHeight)
 private let islandQuestionEmptyLineHeight: CGFloat = 15
 /// Height of the free-text answer field: one **label-only** option row, so `Other…` swapping the rows
 /// for the field never moves the card by a hair.
