@@ -724,8 +724,16 @@ class SessionMonitor {
     /// is why it leaves the card. `400` (invalid answer), `404` (gone), `409` (already settled) and a
     /// transport failure are all the same failure: the form is suppressed until its payload changes, so
     /// the card cannot loop on a question the server will not accept.
+    ///
+    /// No endpoint at all is that same failure, not a quiet return: the reply was asked for and could
+    /// not be made, so the block still drops and the form is suppressed like a `404`.
     func reply(to question: PendingQuestion, answers: [String: QuestionAnswer]) {
-        guard let endpoint = service else { return }
+        guard let endpoint = service else {
+            NSLog("ocbar: form %@ dropped unanswered — no OpenCode service endpoint to reply to", question.id)
+            failedForms[question.id] = question.payload
+            dropQuestion(question.id)
+            return
+        }
         let body: [String: Any] = ["answer": answers.mapValues { $0.jsonValue }]
         Task { @MainActor in
             let accepted = await self.postReply(endpoint: endpoint, question: question, body: body)
@@ -736,16 +744,27 @@ class SessionMonitor {
 
     private func postReply(endpoint: ServiceEndpoint, question: PendingQuestion, body: [String: Any]) async -> Bool {
         let path = "api/session/\(question.sessionID)/form/\(question.id)/reply"
-        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            NSLog("ocbar: form %@ reply could not be encoded: %@", question.id, error.localizedDescription)
+            return false
+        }
         var request = authenticated(endpoint: endpoint, url: endpoint.url.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = data
-        guard let (_, response) = try? await URLSession.shared.data(for: request),
-              let status = (response as? HTTPURLResponse)?.statusCode else { return false }
-        // `204` with an empty body is the contract; any other 2xx is a server that accepted the answer.
-        return (200..<300).contains(status)
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let status = (response as? HTTPURLResponse)?.statusCode else { return false }
+            // `204` with an empty body is the contract; any other 2xx is a server that accepted the answer.
+            return (200..<300).contains(status)
+        } catch {
+            NSLog("ocbar: form %@ reply failed in transport: %@", question.id, error.localizedDescription)
+            return false
+        }
     }
 
     /// Drop a form from the published rows the moment its reply resolves, so the card folds on the
