@@ -727,6 +727,10 @@ final class IslandPanel {
     /// Enter in a list field's `Other…` row: the typed string is added to the picked values.
     var onQuestionCommit: (@MainActor (String, String, String) -> Void)?
 
+    /// Leave a field's text row without answering it: its typed answer or draft is dropped, so the
+    /// options come back. The picked values of a list field are untouched.
+    var onQuestionClear: (@MainActor (String, String) -> Void)?
+
     /// A question's fold deadline arrived for that form. **Not a dismissal:** the form stays pending
     /// and answerable, so the whole host only folds this showing, without latching the form off.
     var onQuestionFoldReached: (@MainActor (String) -> Void)?
@@ -1868,6 +1872,7 @@ final class IslandPanel {
             view.onText = { [weak self] text in self?.textEntered(text) }
             view.onStep = { [weak self] delta in self?.stepField(delta) }
             view.onCommitText = { [weak self] text in self?.commitQuestionText(text) }
+            view.onCancelText = { [weak self] in self?.cancelQuestionText() }
             card.addSubview(view)
             card.questionView = view
         }
@@ -2206,6 +2211,9 @@ final class IslandPanel {
     /// Either way the block draws its text field on the very next configuration.
     private func selectOption(_ option: QuestionOption) {
         guard let question, let field = currentField else { return }
+        // Picking a row is also how the text row closes: the answer it was holding is replaced rather
+        // than left behind with the rows hidden.
+        if isTyping(field) { onQuestionClear?(question.id, field.key) }
         if option.isOther {
             if field.kind == .list {
                 // A list's picked values stay untouched while the draft is open: `Other…` adds to
@@ -2258,6 +2266,15 @@ final class IslandPanel {
     private func commitQuestionText(_ text: String) {
         guard let question, let field = currentField, field.kind == .list else { return }
         onQuestionCommit?(question.id, field.key, text)
+    }
+
+    /// Escape in the free-text row: back to the field's options. A text field's answer **is** its text, so
+    /// dropping the answer is what returns the rows; a list field's draft is dropped and the values
+    /// already picked stay. A field with no rows of its own has nothing to go back to, and refuses.
+    private func cancelQuestionText() {
+        guard let question, let field = currentField, isTyping(field) else { return }
+        guard field.options.contains(where: { !$0.isOther }) else { return }
+        onQuestionClear?(question.id, field.key)
     }
 
     /// A chevron: step to the next or previous field of the same form. Only the field index moves —
@@ -5629,6 +5646,14 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         /// What that text field holds: the typed answer of a text field, or a list field's
         /// unconfirmed draft.
         let text: String
+
+        /// The rows the block draws: the field's options, less `Other…` while its text field is open.
+        /// The typed row takes `Other…`'s place, so the list cannot offer to open what is already open,
+        /// and every other option stays on screen for the user to see and pick.
+        var answerRows: [QuestionOption] {
+            let rows = field?.options ?? []
+            return textEntry ? rows.filter { !$0.isOther } : rows
+        }
     }
 
     /// The form's height for the state it is in, at the text column `width` it will be laid out in.
@@ -5641,17 +5666,22 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     static func height(for content: Content, width: CGFloat, maxHeight: CGFloat) -> CGFloat {
         let textWidth = headerTextWidth(content, width: width)
         let header = islandWrappedHeight(content.body, font: islandQuestionBodyFont, width: textWidth, maxLines: 3)
-        guard content.answerable, let field = content.field else {
+        guard content.answerable, content.field != nil else {
             return islandQuestionTopGap + header
                 + islandQuestionGap + islandQuestionEmptyLineHeight
         }
         // The stepper's row and its gap are chrome only while there is more than one field to step to.
         let chrome = islandQuestionTopGap + header + islandQuestionGap
             + (content.showsStepper ? islandQuestionNavHeight + islandQuestionGap : 0)
-        if content.textEntry { return chrome + islandQuestionTextHeight }
-        return chrome + min(optionsHeight(field.options, width: width),
-                            islandQuestionOptionsMaxHeight,
-                            max(0, maxHeight - chrome))
+        // Text mode adds a row under the options rather than replacing them: the user still sees what
+        // else the field offers, and picking one is the way back out of typing.
+        let rows = content.answerRows
+        let textRow = content.textEntry ? islandQuestionGap + islandQuestionTextHeight : 0
+        let optionsBlock = rows.isEmpty ? 0
+            : min(optionsHeight(rows, width: width),
+                  islandQuestionOptionsMaxHeight,
+                  max(0, maxHeight - chrome - textRow))
+        return chrome + optionsBlock + textRow
     }
 
     /// Width the header's one line may use: the block's own width, less the `2 of 3` counter when the
@@ -5686,6 +5716,9 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     var onStep: (@MainActor (Int) -> Void)?
     /// Enter in a list field's `Other…` row: the typed string is added to the picked values.
     var onCommitText: (@MainActor (String) -> Void)?
+    /// Escape in the text row: back to the field's options. A text-only field has no rows to go back
+    /// to, so the panel refuses this there.
+    var onCancelText: (@MainActor () -> Void)?
 
     /// The free-text answer field, for the panel to make first responder: the card's one keyboard
     /// moment. It is a subview from the start and merely hidden, so taking the keyboard never waits on
@@ -5837,8 +5870,13 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         // them here would delete the very view whose click is on the stack. What to draw is the
         // panel's call (`Content.textEntry`) — a list field's unconfirmed draft is not in its answer.
         let textMode = new.textEntry
-        scroll.isHidden = !(field != nil && !textMode && !(field?.options.isEmpty ?? true))
+        scroll.isHidden = new.answerRows.isEmpty
         textField.isHidden = !textMode
+        // `Other…` is hidden while its own text row is open: the typed row stands where it was, and the
+        // remaining options keep their places above it.
+        for (option, view) in zip(field?.options ?? [], optionViews) {
+            view.isHidden = textMode && option.isOther
+        }
         if textMode, textField.stringValue != new.text {
             textField.stringValue = new.text
         }
@@ -5891,6 +5929,10 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     /// Enter confirms a list field's `Other…` row; nothing else in the block reads the keyboard, and
     /// every other command falls through to the field's own behaviour.
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            onCancelText?()
+            return true
+        }
         guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
         onCommitText?(textField.stringValue)
         return true
@@ -5943,17 +5985,23 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
             y += islandQuestionNavHeight + islandQuestionGap
         }
 
-        let optionsHeight = Self.optionsHeight(field.options, width: fullWidth)
+        let rows = content.answerRows
+        let textRow = content.textEntry ? islandQuestionGap + islandQuestionTextHeight : 0
+        let rowsHeight = Self.optionsHeight(rows, width: fullWidth)
         // `y` is the block's chrome; the options take the smaller of their own height, the block's cap
-        // and whatever of the card's room is left, so a clamped block scrolls instead of clipping.
-        let visibleOptionsHeight = min(optionsHeight, islandQuestionOptionsMaxHeight, max(0, maxHeight - y))
+        // and whatever of the card's room is left — the text row's own height included, so a clamped
+        // block scrolls instead of clipping.
+        let visibleOptionsHeight = min(rowsHeight, islandQuestionOptionsMaxHeight,
+                                       max(0, maxHeight - y - textRow))
         scroll.frame = NSRect(x: 0, y: y, width: fullWidth, height: visibleOptionsHeight)
-        optionsDocument.frame = NSRect(x: 0, y: 0, width: fullWidth, height: optionsHeight)
-        // The text field takes the answer rows' place, on the same line and at the same x, so
-        // `Other…` swapping one for the other moves nothing above or below it.
-        textField.frame = NSRect(x: 0, y: y, width: fullWidth, height: islandQuestionTextHeight)
+        optionsDocument.frame = NSRect(x: 0, y: 0, width: fullWidth, height: rowsHeight)
+        // The text field follows the rows it was opened from, on the same column, so the options stay
+        // visible and clickable under the pointer while the answer is typed.
+        textField.frame = NSRect(x: 0,
+                                 y: y + visibleOptionsHeight + (content.textEntry ? islandQuestionGap : 0),
+                                 width: fullWidth, height: islandQuestionTextHeight)
         var optionY: CGFloat = 0
-        for (option, view) in zip(field.options, optionViews) {
+        for (option, view) in zip(field.options, optionViews) where !view.isHidden {
             let h = Self.optionHeight(option, width: fullWidth)
             view.frame = NSRect(x: 0, y: optionY, width: fullWidth, height: h)
             optionY += h
@@ -6319,6 +6367,14 @@ final class IslandHost {
         for panel in panels { panel.applyQuestionState(questionState) }
     }
 
+    /// Leave a field's text row: the typed answer and the unconfirmed draft both go, which is what puts
+    /// the field's options back. Picked values of a list field are its answer, not its draft, and stay.
+    private func clearQuestionText(formID: String, fieldKey: String) {
+        questionState.answers[formID]?[fieldKey] = nil
+        questionState.drafts[formID]?[fieldKey] = nil
+        pushQuestionState()
+    }
+
     /// Collapse every island — the menubar calls this as its menu opens, so no island anywhere sits in
     /// the menu's way; `rowActivated` calls it when a row is clicked on any screen (unless a question card
     /// is up); and the alert's `Hide` button calls it (`hideRequested`), so one click folds them all. One
@@ -6437,6 +6493,9 @@ final class IslandHost {
             }
             panel.onQuestionCommit = { [weak self] formID, fieldKey, text in
                 self?.commitDraft(formID: formID, fieldKey: fieldKey, text: text)
+            }
+            panel.onQuestionClear = { [weak self] formID, fieldKey in
+                self?.clearQuestionText(formID: formID, fieldKey: fieldKey)
             }
             panel.onQuestionHidden = { [weak self] formID in
                 self?.hideQuestion(formID)
