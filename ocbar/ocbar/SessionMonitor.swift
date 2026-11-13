@@ -247,6 +247,11 @@ class SessionMonitor {
     /// The server tree's CPU (server + its descendants), sampled once per scan tick. See
     /// `ServiceCPUSampler`.
     private var cpuSampler = ServiceCPUSampler()
+    /// Forms whose reply was refused, keyed on the form id and valued with the payload it was asked
+    /// with. The card suppresses that exact question until the payload changes (`waitingSessions`
+    /// filters them out) — a failed submit never retries and never re-offers the same payload. The
+    /// session stays in the waiting state: the server is still blocked on the form.
+    private var failedForms: [String: String] = [:]
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
@@ -355,6 +360,11 @@ class SessionMonitor {
         let active = await activeSessions(endpoint)
         let pending = await waitingSessions(endpoint, sessionList: sessionList, active: active)
         let waiting = pending.waiting
+        // A suppression earns its place only while the form is still on the server. Kept
+        // against the *unfiltered* list, so the very tick that suppresses a form does not
+        // drop the entry that suppresses it.
+        let liveForms = Set(pending.questions.map(\.id))
+        failedForms = failedForms.filter { liveForms.contains($0.key) }
 
         var children: [String: [String]] = [:]
         for s in sessionList {
@@ -402,8 +412,11 @@ class SessionMonitor {
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
             // The forms this root is blocked on. A form belongs to the session stuck
             // on it — often a descendant — so it rides with the root row that
-            // represents it, in the list's own order.
-            let questions = pending.questions.filter { descendants.contains($0.sessionID) }
+            // represents it, in the list's own order. A form whose reply was refused is
+            // dropped here and only re-offered when its payload changes.
+            let questions = pending.questions.filter {
+                descendants.contains($0.sessionID) && failedForms[$0.id] != $0.payload
+            }
             sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid,
                                         sessionTitle: s["title"] as? String,
                                         createdAt: created, updatedAt: updated,
@@ -686,14 +699,62 @@ class SessionMonitor {
         }
         guard let url = components?.url else { return nil }
 
-        var request = URLRequest(url: url)
+        var request = authenticated(endpoint: endpoint, url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        let token = Data("opencode:\(endpoint.password)".utf8).base64EncodedString()
-        request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
 
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return try? JSONSerialization.jsonObject(with: data)
+    }
+
+    /// A request carrying the service's own basic auth — the one credential every call in this file uses.
+    private func authenticated(endpoint: ServiceEndpoint, url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        let token = Data("opencode:\(endpoint.password)".utf8).base64EncodedString()
+        request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    // MARK: - Replying to a question
+
+    /// Send one form's whole answer set. A form settles as a whole on the server, so this is one write
+    /// for the form and not one per field.
+    ///
+    /// **The block drops either way, and a refusal is never retried.** Success settles the form, which
+    /// is why it leaves the card. `400` (invalid answer), `404` (gone), `409` (already settled) and a
+    /// transport failure are all the same failure: the form is suppressed until its payload changes, so
+    /// the card cannot loop on a question the server will not accept.
+    func reply(to question: PendingQuestion, answers: [String: QuestionAnswer]) {
+        guard let endpoint = service else { return }
+        let body: [String: Any] = ["answer": answers.mapValues { $0.jsonValue }]
+        Task { @MainActor in
+            let accepted = await self.postReply(endpoint: endpoint, question: question, body: body)
+            if !accepted { self.failedForms[question.id] = question.payload }
+            self.dropQuestion(question.id)
+        }
+    }
+
+    private func postReply(endpoint: ServiceEndpoint, question: PendingQuestion, body: [String: Any]) async -> Bool {
+        let path = "api/session/\(question.sessionID)/form/\(question.id)/reply"
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+        var request = authenticated(endpoint: endpoint, url: endpoint.url.appendingPathComponent(path))
+        request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let status = (response as? HTTPURLResponse)?.statusCode else { return false }
+        // `204` with an empty body is the contract; any other 2xx is a server that accepted the answer.
+        return (200..<300).contains(status)
+    }
+
+    /// Drop a form from the published rows the moment its reply resolves, so the card folds on the
+    /// click rather than on the next scan tick. The next scan re-derives everything from the server.
+    private func dropQuestion(_ id: String) {
+        for index in state.sessions.indices {
+            state.sessions[index].questions.removeAll { $0.id == id }
+        }
+        onStateChange(state)
     }
 
     /// Map each running `opencode` client (excluding the shared

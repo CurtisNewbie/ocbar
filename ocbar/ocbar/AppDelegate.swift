@@ -134,6 +134,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
         // With the island on, the menubar item is hidden (`render`), so the card's gear is the way into
         // the dropdown: the same `menu` the status item would have shown, popped up at the pointer.
         island.onSettingsRequested = { [weak self] in self?.showMenuFromIsland() }
+        // One form's whole answer set, from whichever screen's card pressed Send: the monitor owns
+        // the write, its auth and the form's lifetime.
+        island.onReplyQuestion = { [weak self] question, answers in
+            self?.monitor.reply(to: question, answers: answers)
+        }
         monitor.onTransition = { [weak self] status, dir, pid, title in
             self?.showBubble(status: status, projectDir: dir, pid: pid, title: title)
         }

@@ -227,6 +227,30 @@ struct QuestionField: Equatable {
 
     /// Whether `Other…` is the last row: only a text field can carry a typed answer.
     var allowsText: Bool { kind == .text && (options.last?.isOther ?? false) }
+
+    /// Whether the card draws this field as its text field, which is two cases:
+    /// `Other…` was picked (so the answer is a text that is not one of the options), or
+    /// `Other…` is the field's only row — a free-text-only field, which has nothing else
+    /// to draw and no reason to make the user click once first.
+    func showsTextEntry(answer: QuestionAnswer?) -> Bool {
+        guard allowsText else { return false }
+        if case .text(let value)? = answer,
+           !options.contains(where: { !$0.isOther && $0.value == value }) {
+            return true
+        }
+        return options.allSatisfy { $0.isOther }
+    }
+
+    /// Whether `option` is the picked answer in the field's own shape: one value for a
+    /// text field, a membership test for a multiselect, the boolean for a boolean.
+    func isSelected(_ option: QuestionOption, answer: QuestionAnswer?) -> Bool {
+        guard let answer, !option.isOther else { return false }
+        switch answer {
+        case .text(let value): return option.value == value
+        case .list(let values): return values.contains(option.value)
+        case .flag(let value): return option.flag == value
+        }
+    }
 }
 
 /// One pending form, resolved to the card's own model. Built from the server's
