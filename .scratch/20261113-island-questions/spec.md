@@ -77,7 +77,8 @@ oldest first, and the card folds once the last one settles.
   per session down with the rows. No new poll loop: reads ride the existing scan tick, the 0.5s render
   tick only draws.
 - **The reply is one write, per form.** A form settles as a whole, so Send submits every field's answer
-  in one request. Send is disabled until every required field carries an answer.
+  in one request. Send is disabled until every required field carries an answer, while a reply for that
+  form is in flight, and for a form the card cannot render.
 - **Selections are state, not render output.** Picked answers are held per form and field, keyed on
   the form's identity, and survive render ticks. They are dropped when the form's payload changes (it
   is a different question then) or when it settles.
@@ -186,7 +187,7 @@ Answer values, by field type: `string` → string, `number`/`integer` → number
 | Key | Type | Domain | Default | Owner | Effect |
 |---|---|---|---|---|---|
 | `ocbar.questions` | bool | on / off | on | island menu | Off: no question card, no unprompted open; the waiting state and notification stay |
-| `ocbar.questionFold` | string | `never`, `5`, `10`, `20`, `30`, `60` | `never` | island menu | `never`: the card stays until answered or hidden. A seconds value folds it that long after it takes the card; the timer restarts per queued form and the pointer never pauses it |
+| `ocbar.questionFold` | string | `never`, `5`, `10`, `20`, `30`, `60` | `never` | island menu | `never`: the card stays until answered or hidden. A seconds value folds it that long after it takes the card; the deadline is armed per showing — a queued form and a card reopened after a fold each get a full one — and the pointer never pauses it |
 
 Both are read at use time, so a menu pick applies without a relaunch — the same rule the existing
 feature gates follow.
@@ -195,8 +196,9 @@ feature gates follow.
 
 - Only sessions the card lists may be answered from it.
 - One form occupies the card at a time; the oldest pending one wins.
-- A pending question outranks an armed alert. The alert's sound and row mark are already spent by
-  that point, and nothing about the alert survives onto the question card.
+- A pending question outranks an armed alert: the question takes the card. The alert stays armed —
+  its own timer and dismissal still end it, and its sound has already played — and its row mark shows
+  only when the asking row is also the alerted row, because the question scopes the card to one row.
 - The waiting session's row is the block's anchor: it is the same row, with the same click-to-focus.
 - Unsent answers survive render ticks; they do not survive a change to the form's payload or the form
   settling.
