@@ -233,8 +233,12 @@ private let questionTruthyValues: Set<String> = ["true", "1", "yes"]
 /// One field of a pending form, resolved into what the card draws.
 struct QuestionField: Equatable {
     let key: String
-    /// The field's short title, else its full question text.
-    let heading: String
+    /// The field's short title, drawn as the block's dim overline. Nil when there is no long question
+    /// under it (the title becomes the body) or when the server sent no title.
+    let overline: String?
+    /// The question itself — the server's `description`, else the title, else the key — drawn as the
+    /// block's body and wrapped to three lines.
+    let body: String
     let required: Bool
     let kind: QuestionFieldKind
     /// Answer rows, `Other…` last. Empty for a field the card cannot render.
@@ -301,19 +305,26 @@ struct PendingQuestion: Equatable {
     }
 }
 
-/// The card's heading for a field: its short title, else the question itself.
-private func questionHeading(title: String?, description: String?, key: String) -> String {
-    for candidate in [title, description] {
-        let text = (candidate ?? "").split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
-        if !text.isEmpty { return text }
+/// The card's two header lines for a field: the short `title` as the overline, and the question
+/// `description` as the body. A description is what makes the title an overline — without one the
+/// title is the body and an overline over it would say the same thing twice. With neither, the
+/// field's key is the body, so a malformed form still names what it is asking about.
+private func questionHeader(title: String?, description: String?, key: String) -> (overline: String?, body: String) {
+    func flattened(_ text: String?) -> String? {
+        let flat = (text ?? "").split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return flat.isEmpty ? nil : flat
     }
-    return key
+    let title = flattened(title)
+    if let description = flattened(description) {
+        return (title, description)
+    }
+    return (nil, title ?? key)
 }
 
 /// The pure seam: one server form entry to the block the card renders.
 ///
 /// Every decision the card's content depends on lives here — which field types it
-/// can answer, the order of the option rows, `Other…` last, the heading fallback,
+/// can answer, the order of the option rows, `Other…` last, the header fallback,
 /// and whether the form is answerable at all — so it can be pinned without a view.
 func pendingQuestion(from json: [String: Any]) -> PendingQuestion? {
     guard let id = json["id"] as? String,
@@ -334,7 +345,7 @@ func pendingQuestion(from json: [String: Any]) -> PendingQuestion? {
 
 private func questionField(from json: [String: Any]) -> QuestionField? {
     guard let key = json["key"] as? String else { return nil }
-    let heading = questionHeading(
+    let header = questionHeader(
         title: json["title"] as? String,
         description: json["description"] as? String,
         key: key
@@ -366,7 +377,7 @@ private func questionField(from json: [String: Any]) -> QuestionField? {
             rows.append(QuestionOption(value: "", label: islandQuestionOtherLabel,
                                        detail: nil, isOther: true, flag: nil))
         } else if rows.isEmpty {
-            return QuestionField(key: key, heading: heading, required: required,
+            return QuestionField(key: key, overline: header.overline, body: header.body, required: required,
                                  kind: .unsupported, options: [], defaultAnswer: nil)
         }
     case .boolean:
@@ -387,14 +398,14 @@ private func questionField(from json: [String: Any]) -> QuestionField? {
             rows.append(QuestionOption(value: "", label: islandQuestionOtherLabel,
                                        detail: nil, isOther: true, flag: nil))
         } else if rows.isEmpty {
-            return QuestionField(key: key, heading: heading, required: required,
+            return QuestionField(key: key, overline: header.overline, body: header.body, required: required,
                                  kind: .unsupported, options: [], defaultAnswer: nil)
         }
     case .number, .integer, .external, .none:
-        return QuestionField(key: key, heading: heading, required: required,
+        return QuestionField(key: key, overline: header.overline, body: header.body, required: required,
                              kind: .unsupported, options: [], defaultAnswer: nil)
     }
-    return QuestionField(key: key, heading: heading, required: required, kind: kind, options: rows,
+    return QuestionField(key: key, overline: header.overline, body: header.body, required: required, kind: kind, options: rows,
                          defaultAnswer: questionDefaultAnswer(kind: kind, json: json))
 }
 

@@ -423,15 +423,16 @@ private let fakeNotchMaxWidth: CGFloat = 240
 /// real corpus rather than for the median (197pt) or the 90th percentile (279pt).
 let islandExpandedCardTargetWidth: CGFloat = 500
 
-/// Width the card aims for while it is **answering a question**: the block's prose — its heading, its
-/// option labels and their descriptions — gets the 220pt this buys before it has to truncate. The
-/// hover card keeps 500 (`islandExpandedCardTargetWidth`) because that number is sized for session
-/// titles, and a wider one there would only add black.
-let islandQuestionCardTargetWidth: CGFloat = 720
+/// Width the card aims for while it is **answering a question**: the block's prose — its overline, its
+/// wrapped question, its option labels and their descriptions — gets the 140pt this buys over the hover
+/// card before it has to truncate. 720 read as too wide on the built-in display, and the question wraps
+/// at 640 without the card reading as a panel. The hover card keeps 500 (`islandExpandedCardTargetWidth`)
+/// because that number is sized for session titles, and a wider one there would only add black.
+let islandQuestionCardTargetWidth: CGFloat = 640
 
 /// Share of the target screen's width the card may take before it stops growing.
 /// A guard rather than a live constraint here — it only binds on screens narrower
-/// than ~625pt (~900pt for the 720pt question card), and the attached displays are
+/// than ~625pt (~800pt for the 640pt question card), and the attached displays are
 /// 1512pt and 1920pt.
 private let expandedWidthFraction: CGFloat = 0.8
 
@@ -743,6 +744,11 @@ final class IslandPanel {
     /// Whether the card is currently in its expanded state.
     var isExpanded: Bool { expandedState }
 
+    /// Whether a question card is **on screen** right now: a form is pending and the card is expanded.
+    /// The host reads it to leave a card open on a row click — the user is about to answer, and folding
+    /// would take the question, the selections and the field position with it (`IslandHost.rowActivated`).
+    var hasQuestionCardUp: Bool { questionArmed && expandedState }
+
     /// Retire this panel: off screen, timers stopped, window released. The host
     /// calls it when the display it belongs to is no longer attached.
     func retire() {
@@ -813,7 +819,7 @@ final class IslandPanel {
         }
         // **A pending question takes the card by itself, once per form.** Unprompted like an alert —
         // the user did not hover — and on every screen, because the host fans this tick out to all of
-        // them. `autoOpenedQuestionID` is what keeps a card the user put away (`Hide`, a row click, the
+        // them. `autoOpenedQuestionID` is what keeps a card the user put away (`Hide`, the fold deadline, the
         // menubar opening) folded while that same form is still pending; a queued form is a new id and
         // takes the card again.
         if let question, question.id != autoOpenedQuestionID, visible, !rows.isEmpty {
@@ -832,9 +838,11 @@ final class IslandPanel {
     }
 
     /// Force the card back to its collapsed state — the host calls this when the menubar menu opens, so
-    /// the island never sits in the menu's way, **and when a row is clicked or the alert's `Hide` button
-    /// is pressed on any screen**, so one click folds them all. An alert in flight dies with it: all three
-    /// are the user answering the reminder.
+    /// the island never sits in the menu's way, **when a row is clicked on a card that is not asking**,
+    /// and when the alert's `Hide` button is pressed on any screen, so one click folds them all. An
+    /// alert in flight dies with it: all three are the user answering the reminder. A question card is
+    /// the exception the host makes on purpose (`IslandHost.rowActivated`) — its `Hide` still comes here,
+    /// because hiding a form *is* dismissing it.
     ///
     /// It also **latches the hover open off** (see `hoverLatched`): a dismissal the pointer is standing
     /// inside must not be undone by the next 0.15s poll tick.
@@ -1014,7 +1022,7 @@ final class IslandPanel {
     /// a tick that merely redraws the block from re-taking it.
     private var questionKeyHeld = false
     /// The form this panel has already opened itself for. The unprompted open happens **once per
-    /// form**, not once per tick: a card the user dismissed — `Hide`, a row click, the menubar
+    /// form**, not once per tick: a card the user dismissed — `Hide`, the fold deadline, the menubar
     /// opening — must stay folded while that form is still pending. A queued form has a new id, so it
     /// takes the card again.
     private var autoOpenedQuestionID: String?
@@ -1037,12 +1045,12 @@ final class IslandPanel {
     private var hoverTimer: Timer?
 
     /// **A dismissal latches the hover open off until the pointer leaves.** Set by `collapse()` — the
-    /// menubar opening and a row click on any screen — and released in exactly three situations: the
-    /// pointer is *seen* outside the hover rect (`evaluateHover`, the only thing that can observe what
-    /// the latch is waiting for), anything else opens the card (`setExpanded(true)` — an alert is new
-    /// information the user has not answered, not the poll second-guessing a dismissal), and the panel
-    /// leaving or returning to screen (`hide`/`present`, so a latch set while the island was off screen
-    /// cannot stick to it).
+    /// menubar opening and a row click on a card that is not asking — and released in exactly three
+    /// situations: the pointer is *seen* outside the hover rect (`evaluateHover`, the only thing that can
+    /// observe what the latch is waiting for), anything else opens the card (`setExpanded(true)` — an
+    /// alert is new information the user has not answered, not the poll second-guessing a dismissal), and
+    /// the panel leaving or returning to screen (`hide`/`present`, so a latch set while the island was off
+    /// screen cannot stick to it).
     ///
     /// Not a nicety. The pointer is inside the island when a row is clicked, and on a display with no
     /// cutout the rows begin *above* the collapsed pill's own bottom edge (`contentTop` is 8 there
@@ -1528,7 +1536,7 @@ final class IslandPanel {
             rowGap: islandRowGap,
             summaryRowHeight: summaryRowHeight,
             actionRowHeight: actionRowHeight,
-            extraContentHeight: questionBlockHeight,
+            extraContentHeight: questionBlockHeight(for: metrics),
             tallestRowHeight: tallestRowHeight,
             fraction: listHeightFraction
         )
@@ -1643,11 +1651,12 @@ final class IslandPanel {
             let view = IslandRowView(frame: .zero)
             view.onSelect = { [weak self] pid in
                 guard let self else { return }
-                // Answered by the host rather than here: one screen's row click has to end the reminder
-                // on *every* screen (the other display's card would otherwise sit open for the rest of
-                // the alert's seconds), and only the host can reach the other panels. It also carries
-                // the hover latch the panel needs, since the pointer is inside this island by
-                // construction — see `IslandHost.rowActivated`.
+                // Answered by the host rather than here: one screen's row click has to end an alert's
+                // reminder on *every* screen (the other display's card would otherwise sit open for the
+                // rest of the alert's seconds), and only the host can reach the other panels. It also
+                // carries the hover latch the panel needs when it *does* fold, since the pointer is
+                // inside this island by construction — see `IslandHost.rowActivated`, and its
+                // question-card exception beside it.
                 self.onRowActivated?(pid)
             }
             card.addSubview(view)
@@ -1757,7 +1766,8 @@ final class IslandPanel {
         let textMode = field.map { isTyping($0) } ?? false
         return IslandQuestionView.Content(
             formID: question.id,
-            heading: field?.heading ?? "",
+            overline: field?.overline,
+            body: field?.body ?? "",
             fieldIndex: index,
             fieldCount: fields.count,
             queueIndex: 1,
@@ -1790,8 +1800,23 @@ final class IslandPanel {
 
     /// Height the question block costs the card right now. Zero when nothing is
     /// asking, which is every card that is not a question card.
-    private var questionBlockHeight: CGFloat {
-        questionContent().map(IslandQuestionView.height(for:)) ?? 0
+    ///
+    /// The width is the block's **own** text column — the card's derived width less the same two insets
+    /// `IslandCardView.layout` gives it — because the question wraps and the height it wraps to depends
+    /// on it. Measuring at the card's width rather than at a nominal one is what keeps the budget and the
+    /// placed frame the same number on a narrow screen, where the clamp makes the card narrower too.
+    private func questionBlockHeight(for metrics: ScreenMetrics) -> CGFloat {
+        questionContent().map {
+            IslandQuestionView.height(for: $0, width: questionBlockWidth(for: metrics))
+        } ?? 0
+    }
+
+    /// The question block's text column on this screen: the expanded card's derived width less the block's
+    /// leading and trailing insets, the two numbers `IslandCardView.layout` places it with.
+    private func questionBlockWidth(for metrics: ScreenMetrics) -> CGFloat {
+        let collapsed = collapsedSize(metrics: metrics)
+        return max(0, expandedCardWidth(collapsedWidth: collapsed.width, metrics: metrics)
+            - islandRowTextInset - islandRowTrailingInset)
     }
 
     /// Add, refresh or drop the question block under the waiting row, and report
@@ -1822,7 +1847,7 @@ final class IslandPanel {
             card.addSubview(view)
             card.questionView = view
         }
-        let changed = view.configure(content)
+        let changed = view.configure(content, width: questionBlockWidth(for: currentMetrics()))
         // The block is what shows and hides the text field, so every rebuild is also a chance to give
         // the keyboard back — a field step, a commit, a settle or a payload change.
         syncQuestionKeyboard()
@@ -1952,7 +1977,7 @@ final class IslandPanel {
         if value { hoverLatched = false }
         expandedState = value
         // A fold ends the card's one keyboard moment wherever it came from (the deadline, `Hide`,
-        // the menubar, a row click); the terminal gets its typing back here rather than on the next tick.
+        // the menubar); the terminal gets its typing back here rather than on the next tick.
         syncQuestionKeyboard()
         // Before the guard: the card's rows follow `expandedState` whether or not this panel is up,
         // and a row's mark must stop the moment the card starts closing rather than at the next tick.
@@ -5463,31 +5488,77 @@ private func islandTinted(_ image: NSImage, color: NSColor) -> NSImage {
 /// column, and is the only content on the card that is neither a row nor chrome.
 ///
 /// `topGap` is the block's air above itself and is **part of its height**, not the card's `rowGap`:
-/// the block is not a row, and `rowGap` exists to separate rows. The heading is one line and is
-/// truncated rather than wrapped — a form's short title is its heading, and a long question text
-/// already loses to the terminal at that point.
+/// the block is not a row, and `rowGap` exists to separate rows.
 private let islandQuestionTopGap: CGFloat = 8
-private let islandQuestionHeadingHeight: CGFloat = 17
 private let islandQuestionNavHeight: CGFloat = 20
 private let islandQuestionGap: CGFloat = 4
-private let islandQuestionOptionHeight: CGFloat = 26
-private let islandQuestionOptionDetailHeight: CGFloat = 38
+
+/// Height of one line of `font` as the cell lays it out, rounded up — the height a wrapped label's frame
+/// has to hold for its last line to be drawn rather than clipped.
+private func islandLineHeight(_ font: NSFont) -> CGFloat {
+    ceil(font.ascender - font.descender + font.leading)
+}
+
+/// Height one line of `font` takes in a label **cell**. The base tier's cell adds nothing to the font's
+/// own line box; the 11pt tier's adds a point (measured), so a frame measured from font metrics alone
+/// would clip a two-line detail's last line.
+private func islandLabelLineHeight(_ font: NSFont) -> CGFloat {
+    let cell = NSTextFieldCell(textCell: "Ag")
+    cell.font = font
+    return ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: 1000, height: 100)).height)
+}
+
+/// Height `text` wraps to at `width`, capped at `maxLines` — the block's one way of turning prose into a
+/// frame height. The cap is what stops a long question or option detail from growing the card past the
+/// lines it actually draws, and the same helper measures the header, the options and their rows.
+private func islandWrappedHeight(_ text: String, font: NSFont, width: CGFloat, maxLines: Int) -> CGFloat {
+    guard !text.isEmpty else { return 0 }
+    let measured = (text as NSString).boundingRect(
+        with: NSSize(width: max(1, width), height: .greatestFiniteMagnitude),
+        options: [.usesLineFragmentOrigin, .usesFontLeading],
+        attributes: [.font: font]
+    ).height
+    let lines = min(maxLines, max(1, Int((measured / islandLineHeight(font)).rounded())))
+    return islandLabelLineHeight(font) * CGFloat(lines)
+}
+
+/// The block's three type tiers, as font objects: the question/option label at the card's base size,
+/// and the overline, option detail and queue counter at its subordinate one. `height(for:)` measures
+/// with these same fonts, so a line counted and a line drawn cannot come from two different faces.
+private let islandQuestionBodyFont = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .medium)
+private let islandQuestionOptionLabelFont = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .regular)
+private let islandQuestionSecondaryFont = NSFont.systemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+private let islandQuestionQueueFont = NSFont.monospacedDigitSystemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+private let islandQuestionBodyLineHeight = islandLabelLineHeight(islandQuestionBodyFont)
+private let islandQuestionSecondaryLineHeight = islandLabelLineHeight(islandQuestionSecondaryFont)
+
+/// Padding above and below an option row's text. With no separator between rows this is the whole gap
+/// between one option's text and the next, and it is a few points more than the 6pt it shipped with so
+/// a row does not read as cramped at 640pt.
+private let islandQuestionOptionVerticalPadding: CGFloat = 8
+/// Air between an option row's text and the row's own edges, on both sides. The checkmark keeps its own
+/// trailing column; this is what stops the label butting the edge under the row's hover wash.
+private let islandQuestionOptionTextInset: CGFloat = 6
 /// Most the options may take before they scroll. The card's list budget owns how tall the card may get
 /// and pays the block's whole height (`IslandListBudget.extraContentHeight`); this is the block's own
-/// cap inside that, sized to a few two-line options. Options scroll rather than clip past it.
-private let islandQuestionOptionsMaxHeight: CGFloat = 132
+/// cap inside that. **Three two-line options** — the shortest list that shows what a wrapped detail
+/// costs — work out as 3 × (2 × 8 padding + 15 label + 2 × 14 detail) = 177, so no option is
+/// half-clipped before the scrollbar takes over.
+private let islandQuestionOptionsMaxHeight: CGFloat =
+    3 * (islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight + 2 * islandQuestionSecondaryLineHeight)
 private let islandQuestionEmptyLineHeight: CGFloat = 15
-/// Height of the free-text answer field, one option row's worth so `Other…` swapping the rows for the
-/// field never moves the card by a hair.
-private let islandQuestionTextHeight: CGFloat = 26
+/// Height of the free-text answer field: one **label-only** option row, so `Other…` swapping the rows
+/// for the field never moves the card by a hair.
+private let islandQuestionTextHeight: CGFloat =
+    islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight
 private let islandQuestionStepButtonSize: CGFloat = 20
 /// Shown inside the card's one editable field before anything is typed. Without it the block would
 /// open a caret on black with nothing saying what it is for.
 private let islandQuestionTextPlaceholder = "Type an answer…"
 
-/// The pending question, drawn under the waiting session's row: the field's heading, the field
-/// stepper (`‹ 1 / 2 ›`) and the field's answer rows — or, for a form the card cannot answer, one dim
-/// line saying so.
+/// The pending question, drawn under the waiting session's row: the field's dim short title, the
+/// question itself wrapped beneath it, the field stepper (`‹ 1 / 2 ›`) and the field's answer rows —
+/// or, for a form the card cannot answer, one dim line saying so.
 ///
 /// **Every control lives in this one view**, which is why the card's `hitTest` descends into it
 /// instead of claiming it whole: the option rows, the chevrons and the free-text field are the things
@@ -5503,8 +5574,11 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     /// changes nothing touches no view.
     struct Content: Equatable {
         let formID: String
-        /// The current field's heading — the field's short title, else its question text.
-        let heading: String
+        /// The current field's short title, drawn dim above the question. Nil when it has no title or
+        /// no long question for the title to introduce.
+        let overline: String?
+        /// The question itself — the field's full text — wrapped to three lines under the overline.
+        let body: String
         let fieldIndex: Int
         let fieldCount: Int
         /// This form's position among all pending forms (`1 of 3`), oldest first.
@@ -5526,30 +5600,51 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         let text: String
     }
 
-    /// The form's height for the state it is in. The panel reads this for the card's own height
-    /// (`IslandCardView.contentHeight`), so the block's frame and the card's cannot disagree.
-    static func height(for content: Content) -> CGFloat {
+    /// The form's height for the state it is in, at the text column `width` it will be laid out in.
+    /// The panel reads this for the card's own height (`IslandCardView.contentHeight`) and the block's
+    /// `layout()` steps by these same helpers, so the frame and the drawing cannot disagree.
+    static func height(for content: Content, width: CGFloat) -> CGFloat {
+        let textWidth = headerTextWidth(content, width: width)
+        let header = (content.overline == nil ? 0 : islandQuestionSecondaryLineHeight)
+            + islandWrappedHeight(content.body, font: islandQuestionBodyFont, width: textWidth, maxLines: 3)
         guard content.answerable, let field = content.field else {
-            return islandQuestionTopGap + islandQuestionHeadingHeight
+            return islandQuestionTopGap + header
                 + islandQuestionGap + islandQuestionEmptyLineHeight
         }
         let body: CGFloat
         if content.textEntry {
             body = islandQuestionTextHeight
         } else {
-            body = min(optionsHeight(field.options), islandQuestionOptionsMaxHeight)
+            body = min(optionsHeight(field.options, width: width), islandQuestionOptionsMaxHeight)
         }
-        return islandQuestionTopGap + islandQuestionHeadingHeight + islandQuestionGap
+        return islandQuestionTopGap + header + islandQuestionGap
             + islandQuestionNavHeight + islandQuestionGap + body
     }
 
-    private static func optionsHeight(_ options: [QuestionOption]) -> CGFloat {
-        options.reduce(0) { $0 + optionHeight($1) }
+    /// Width the header's two lines may use: the block's own width, less the `2 of 3` counter when the
+    /// queue has one. The counter sits at the first line's trailing end, so the text stops before it —
+    /// the same reservation `layout()` makes.
+    private static func headerTextWidth(_ content: Content, width: CGFloat) -> CGFloat {
+        guard content.queueCount > 1 else { return width }
+        return max(0, width - queueWidth(content) - islandRowGlyphGap)
+    }
+
+    /// Width the `2 of 3` counter needs, from the label's own cell — the same `islandLabelWidth` the
+    /// layout uses, so reserving the space and drawing in it cannot cut a glyph.
+    private static func queueWidth(_ content: Content) -> CGFloat {
+        guard content.queueCount > 1 else { return 0 }
+        let label = NSTextField(labelWithString: "\(content.queueIndex) of \(content.queueCount)")
+        label.font = islandQuestionQueueFont
+        return islandLabelWidth(for: label)
+    }
+
+    private static func optionsHeight(_ options: [QuestionOption], width: CGFloat) -> CGFloat {
+        options.reduce(0) { $0 + optionHeight($1, width: width) }
     }
 
     /// The block's current height, for the card's layout and `contentHeight`. Both read this one
     /// property, so the frame the panel animates to and the layout it draws are the same height.
-    var height: CGFloat { content.map { Self.height(for: $0) } ?? 0 }
+    var height: CGFloat { content.map { Self.height(for: $0, width: width) } ?? 0 }
 
     /// The block's three interactions. The panel answers each with a state change; the block itself
     /// holds nothing the user picked.
@@ -5568,11 +5663,19 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     var isTextEntryVisible: Bool { !textField.isHidden }
 
     private var content: Content?
+    /// The text column the block is measured at, set by `configure` from the panel's derived card width.
+    /// The header and the option rows wrap, so their height is a function of this, and the card's budget
+    /// and `height` have to measure the same width or they would disagree about a line.
+    private var width: CGFloat = 0
     /// The option set currently built into `optionViews`. A change here is the only thing that
     /// rebuilds those views — a selection or a keystroke must not remove a view out from under the
     /// click or the keystroke that caused it.
     private var optionsKey: String?
-    private let headingLabel = NSTextField(labelWithString: "")
+    /// The field's short title, dim above the question. Hidden when there is no long question for it to
+    /// introduce — the title is the body then, not a heading over itself.
+    private let overlineLabel = NSTextField(labelWithString: "")
+    /// The question itself, wrapped to three lines and truncated there.
+    private let bodyLabel = NSTextField(labelWithString: "")
     private let unsupportedLabel = NSTextField(labelWithString: islandQuestionUnsupportedText)
     private let queueLabel = NSTextField(labelWithString: "")
     private let counterLabel = NSTextField(labelWithString: "")
@@ -5588,22 +5691,38 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
 
-        headingLabel.font = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .medium)
-        headingLabel.textColor = NSColor.white.withAlphaComponent(0.92)
-        headingLabel.lineBreakMode = .byTruncatingTail
-        headingLabel.usesSingleLineMode = true
-        addSubview(headingLabel)
+        overlineLabel.font = islandQuestionSecondaryFont
+        overlineLabel.textColor = NSColor.white.withAlphaComponent(0.5)
+        overlineLabel.lineBreakMode = .byTruncatingTail
+        overlineLabel.usesSingleLineMode = true
+        overlineLabel.isHidden = true
+        addSubview(overlineLabel)
 
-        // The dim line for a form the card cannot answer: a sibling of the heading, not a mode.
-        unsupportedLabel.font = NSFont.systemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        // The question's own white sits a step above the overline: the dim line says which field this is,
+        // the bright one is what the user is being asked, and the card's existing α0.5/α0.92 ladder does
+        // that without a new alpha. It wraps to three lines and truncates there rather than running the
+        // card taller than the list budget pays for.
+        bodyLabel.font = islandQuestionBodyFont
+        bodyLabel.textColor = NSColor.white.withAlphaComponent(0.92)
+        bodyLabel.lineBreakMode = .byTruncatingTail
+        bodyLabel.usesSingleLineMode = false
+        bodyLabel.maximumNumberOfLines = 3
+        // `usesSingleLineMode` alone does not turn wrapping on: the cell's own `wraps` is what makes the
+        // frame's height hold several lines and the last one end in an ellipsis.
+        bodyLabel.cell?.wraps = true
+        bodyLabel.cell?.isScrollable = false
+        addSubview(bodyLabel)
+
+        // The dim line for a form the card cannot answer: a sibling of the header, not a mode.
+        unsupportedLabel.font = islandQuestionSecondaryFont
         unsupportedLabel.textColor = NSColor.white.withAlphaComponent(0.5)
         unsupportedLabel.usesSingleLineMode = true
         unsupportedLabel.isHidden = true
         addSubview(unsupportedLabel)
 
-        // `2 of 3`: which form of the queue this is, on the heading's line at the trailing edge. It
+        // `2 of 3`: which form of the queue this is, on the header's first line at the trailing edge. It
         // only exists when something is queued behind this one.
-        queueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        queueLabel.font = islandQuestionQueueFont
         queueLabel.textColor = NSColor.white.withAlphaComponent(0.5)
         queueLabel.alignment = .right
         queueLabel.usesSingleLineMode = true
@@ -5612,7 +5731,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
 
         // `1 / 2`: which field of this form. Between the chevrons, at the card's subordinate size,
         // tabular so stepping never shifts it.
-        counterLabel.font = NSFont.monospacedDigitSystemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        counterLabel.font = islandQuestionQueueFont
         counterLabel.textColor = NSColor.white.withAlphaComponent(0.55)
         counterLabel.usesSingleLineMode = true
         counterLabel.isHidden = true
@@ -5659,15 +5778,20 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         fatalError("init(coder:) is not used")
     }
 
-    /// Point the block at a form state. Returns whether the block's **height** changed, which is the
-    /// one thing the card has to act on; a repaint inside the same height is the block's own.
+    /// Point the block at a form state, measured at `width` — the text column the card will lay it out
+    /// in. Returns whether the block's **height** changed, which is the one thing the card has to act
+    /// on; a repaint inside the same height is the block's own.
     @discardableResult
-    func configure(_ new: Content) -> Bool {
-        let heightChanged = content.map { Self.height(for: $0) } != Self.height(for: new)
-        guard content != new else { return false }
+    func configure(_ new: Content, width newWidth: CGFloat) -> Bool {
+        let heightChanged = newWidth != width
+            || content.map { Self.height(for: $0, width: width) } != Self.height(for: new, width: newWidth)
+        guard content != new || newWidth != width else { return false }
         content = new
+        width = newWidth
 
-        headingLabel.stringValue = new.heading
+        overlineLabel.stringValue = new.overline ?? ""
+        overlineLabel.isHidden = new.overline == nil
+        bodyLabel.stringValue = new.body
         queueLabel.isHidden = new.queueCount <= 1
         queueLabel.stringValue = "\(new.queueIndex) of \(new.queueCount)"
         unsupportedLabel.isHidden = new.answerable
@@ -5747,21 +5871,32 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         super.layout()
         var y = islandQuestionTopGap
         let fullWidth = max(0, bounds.width)
+        let content = self.content
 
-        // `2 of 3` takes the heading line's trailing end, so the heading truncates before it rather
-        // than running under it.
-        let queueWidth = queueLabel.isHidden ? 0 : islandLabelWidth(for: queueLabel)
-        let headingWidth = max(0, fullWidth - (queueLabel.isHidden ? 0 : queueWidth + islandRowGlyphGap))
-        let headingSize = headingLabel.intrinsicContentSize
-        headingLabel.frame = NSRect(x: 0, y: y + (islandQuestionHeadingHeight - headingSize.height) / 2,
-                                    width: headingWidth, height: headingSize.height)
-        y += islandQuestionHeadingHeight
-
-        if !queueLabel.isHidden {
-            let size = queueLabel.intrinsicContentSize
+        // The header's two lines: the dim short title, then the question itself wrapped to three lines.
+        // `2 of 3` takes the first line's trailing end, so the text width stops before it rather than
+        // running under it — the same reservation `height(for:)` measures with.
+        let headerWidth = content.map { Self.headerTextWidth($0, width: fullWidth) } ?? fullWidth
+        if content?.overline != nil {
+            overlineLabel.frame = NSRect(x: 0, y: y, width: headerWidth,
+                                         height: islandQuestionSecondaryLineHeight)
+            y += islandQuestionSecondaryLineHeight
+        }
+        if let content {
+            let bodyHeight = islandWrappedHeight(content.body, font: islandQuestionBodyFont,
+                                                 width: headerWidth, maxLines: 3)
+            bodyLabel.frame = NSRect(x: 0, y: y, width: headerWidth, height: bodyHeight)
+            y += bodyHeight
+        }
+        if let content, content.queueCount > 1 {
+            let queueWidth = Self.queueWidth(content)
+            let queueHeight = queueLabel.intrinsicContentSize.height
+            let firstLine = content.overline == nil
+                ? islandQuestionBodyLineHeight
+                : islandQuestionSecondaryLineHeight
             queueLabel.frame = NSRect(x: max(0, fullWidth - queueWidth),
-                                      y: islandQuestionTopGap + (islandQuestionHeadingHeight - size.height) / 2,
-                                      width: queueWidth, height: size.height)
+                                      y: islandQuestionTopGap + (firstLine - queueHeight) / 2,
+                                      width: queueWidth, height: queueHeight)
         }
         y += islandQuestionGap
 
@@ -5785,23 +5920,30 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
                                   width: islandQuestionStepButtonSize, height: islandQuestionStepButtonSize)
         y += islandQuestionNavHeight + islandQuestionGap
 
-        let optionsHeight = min(Self.optionsHeight(field.options), islandQuestionOptionsMaxHeight)
-        scroll.frame = NSRect(x: 0, y: y, width: fullWidth, height: optionsHeight)
-        optionsDocument.frame = NSRect(x: 0, y: 0, width: fullWidth,
-                                       height: max(optionsHeight, Self.optionsHeight(field.options)))
+        let optionsHeight = Self.optionsHeight(field.options, width: fullWidth)
+        let visibleOptionsHeight = min(optionsHeight, islandQuestionOptionsMaxHeight)
+        scroll.frame = NSRect(x: 0, y: y, width: fullWidth, height: visibleOptionsHeight)
+        optionsDocument.frame = NSRect(x: 0, y: 0, width: fullWidth, height: optionsHeight)
         // The text field takes the answer rows' place, on the same line and at the same x, so
         // `Other…` swapping one for the other moves nothing above or below it.
         textField.frame = NSRect(x: 0, y: y, width: fullWidth, height: islandQuestionTextHeight)
         var optionY: CGFloat = 0
         for (option, view) in zip(field.options, optionViews) {
-            let h = Self.optionHeight(option)
+            let h = Self.optionHeight(option, width: fullWidth)
             view.frame = NSRect(x: 0, y: optionY, width: fullWidth, height: h)
             optionY += h
         }
     }
 
-    private static func optionHeight(_ option: QuestionOption) -> CGFloat {
-        option.detail == nil ? islandQuestionOptionHeight : islandQuestionOptionDetailHeight
+    /// One option row's height at `width`: its one-line label plus a detail of 0, 1 or 2 wrapped lines,
+    /// with the row's air above and below. The block's options height and `layout()` both call it, so a
+    /// mixed list of one- and two-line rows cannot drift from the height the card budgets.
+    private static func optionHeight(_ option: QuestionOption, width: CGFloat) -> CGFloat {
+        let textWidth = max(0, width - IslandQuestionOptionView.textColumnInset)
+        let detail = option.detail.map {
+            islandWrappedHeight($0, font: islandQuestionSecondaryFont, width: textWidth, maxLines: 2)
+        } ?? 0
+        return islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight + detail
     }
 }
 
@@ -5820,6 +5962,18 @@ private final class FlippedView: NSView {
 private final class IslandQuestionOptionView: NSView {
     var onSelect: (@MainActor () -> Void)?
 
+    /// The checkmark, created once so the block can reserve its column and measure an option's text box
+    /// against the same width the row draws in.
+    private static let markImage = islandSymbolImage(
+        symbol: "checkmark", color: NSColor.white.withAlphaComponent(0.9), pointSize: 10
+    )
+    /// The trailing column the checkmark occupies. Reserved on every row of a field, so a selection
+    /// appearing or moving changes no label's width — only which row carries the tick.
+    static let markColumnWidth: CGFloat = (markImage?.size.width ?? 0) + islandRowGlyphGap
+    /// The row's text box begins `islandQuestionOptionTextInset` in from each side and ends before the
+    /// checkmark's column. Both the row's own layout and the block's height arithmetic read this one sum.
+    static let textColumnInset: CGFloat = markColumnWidth + islandQuestionOptionTextInset * 2
+
     private let label = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let mark = NSImageView()
@@ -5832,20 +5986,25 @@ private final class IslandQuestionOptionView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        label.font = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .regular)
+        label.font = islandQuestionOptionLabelFont
         label.textColor = NSColor.white.withAlphaComponent(0.7)
         label.lineBreakMode = .byTruncatingTail
         label.usesSingleLineMode = true
         addSubview(label)
 
-        detail.font = NSFont.systemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        // The server's explanatory line wraps to two lines and truncates there: a detail is worth more
+        // than one clipped line at 640pt, but not an unbounded row height the budget cannot predict.
+        detail.font = islandQuestionSecondaryFont
         detail.textColor = NSColor.white.withAlphaComponent(0.5)
         detail.lineBreakMode = .byTruncatingTail
-        detail.usesSingleLineMode = true
+        detail.usesSingleLineMode = false
+        detail.maximumNumberOfLines = 2
+        detail.cell?.wraps = true
+        detail.cell?.isScrollable = false
         detail.isHidden = true
         addSubview(detail)
 
-        mark.image = islandSymbolImage(symbol: "checkmark", color: NSColor.white.withAlphaComponent(0.9), pointSize: 10)
+        mark.image = Self.markImage
         mark.imageScaling = .scaleNone
         mark.isHidden = true
         addSubview(mark)
@@ -5867,26 +6026,24 @@ private final class IslandQuestionOptionView: NSView {
 
     override func layout() {
         super.layout()
-        let fullWidth = max(0, bounds.width - markWidth)
-        let labelSize = label.intrinsicContentSize
+        let textX = islandQuestionOptionTextInset
+        let textWidth = max(0, bounds.width - Self.textColumnInset)
+        let labelHeight = islandQuestionBodyLineHeight
         if detail.isHidden {
-            label.frame = NSRect(x: 0, y: (bounds.height - labelSize.height) / 2,
-                                 width: fullWidth, height: labelSize.height)
+            label.frame = NSRect(x: textX, y: (bounds.height - labelHeight) / 2,
+                                 width: textWidth, height: labelHeight)
         } else {
-            let detailSize = detail.intrinsicContentSize
-            label.frame = NSRect(x: 0, y: 6, width: fullWidth, height: labelSize.height)
-            detail.frame = NSRect(x: 0, y: 6 + labelSize.height, width: fullWidth, height: detailSize.height)
+            let detailHeight = islandWrappedHeight(detail.stringValue, font: islandQuestionSecondaryFont,
+                                                   width: textWidth, maxLines: 2)
+            label.frame = NSRect(x: textX, y: islandQuestionOptionVerticalPadding,
+                                 width: textWidth, height: labelHeight)
+            detail.frame = NSRect(x: textX, y: islandQuestionOptionVerticalPadding + labelHeight,
+                                  width: textWidth, height: detailHeight)
         }
         let markSize = mark.image?.size ?? .zero
         mark.frame = NSRect(x: bounds.width - markSize.width,
                             y: (bounds.height - markSize.height) / 2,
                             width: markSize.width, height: markSize.height)
-    }
-
-    /// The trailing column the checkmark occupies. Reserved on every row of a field, so a selection
-    /// appearing or moving changes no label's width — only which row carries the tick.
-    private var markWidth: CGFloat {
-        (mark.image?.size.width ?? 0) + islandRowGlyphGap
     }
 
     override func updateTrackingAreas() {
@@ -6138,17 +6295,17 @@ final class IslandHost {
     }
 
     /// Collapse every island — the menubar calls this as its menu opens, so no island anywhere sits in
-    /// the menu's way; `rowActivated` calls it when a row is clicked on any screen; and the alert's `Hide`
-    /// button calls it (`hideRequested`), so one click folds them all. One primitive for all three, because
-    /// all three are the user dismissing the island *with the pointer inside it* — which is why they latch
-    /// (`IslandPanel.hoverLatched`) and why the alert's third exit, `dismissAlert`, does not come through
-    /// here.
+    /// the menu's way; `rowActivated` calls it when a row is clicked on any screen (unless a question card
+    /// is up); and the alert's `Hide` button calls it (`hideRequested`), so one click folds them all. One
+    /// primitive for all three, because all three are the user dismissing the island *with the pointer
+    /// inside it* — which is why they latch (`IslandPanel.hoverLatched`) and why the alert's third exit,
+    /// `dismissAlert`, does not come through here.
     func collapse() {
         for panel in panels { panel.collapse() }
     }
 
-    /// A row was clicked on one screen's island: fold **every** screen's island — ending any alert with
-    /// it — and then hand the pid to the session focus.
+    /// A row was clicked on one screen's island: hand the pid to the session focus, and fold every
+    /// screen's island — **unless a question card is up.**
     ///
     /// Host-owned on purpose. The reminder is shown on every screen, so answering it on one is answering
     /// it: folding only the clicked panel would leave the other display's card open for the rest of
@@ -6156,8 +6313,16 @@ final class IslandHost {
     /// `collapse()`, the same path the menubar takes, so the panel's hover latch (`hoverLatched`) covers
     /// this dismissal too — the pointer is inside the island the user just clicked, and without the latch
     /// the hover poll would re-open the card 0.35s later.
+    ///
+    /// **A question card is the exception, and focus is not.** The user is about to answer, so folding
+    /// would take the question, the selections and the field position away in one click; the row still
+    /// focuses the session through the same `onSelectSession`, which touches none of the shared question
+    /// state and none of its deadline. The alert's row click keeps both halves — that rule is the alert's
+    /// own (`docs/island-alert.md`) and is not this one.
     private func rowActivated(pid: Int32?) {
-        collapse()
+        if !panels.contains(where: { $0.hasQuestionCardUp }) {
+            collapse()
+        }
         onSelectSession?(pid)
     }
 
