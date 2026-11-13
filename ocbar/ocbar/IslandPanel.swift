@@ -5834,7 +5834,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         // them here would delete the very view whose click is on the stack. What to draw is the
         // panel's call (`Content.textEntry`) — a list field's unconfirmed draft is not in its answer.
         let textMode = new.textEntry
-        scroll.isHidden = !(showsNav && !textMode && !(field?.options.isEmpty ?? true))
+        scroll.isHidden = !(field != nil && !textMode && !(field?.options.isEmpty ?? true))
         textField.isHidden = !textMode
         if textMode, textField.stringValue != new.text {
             textField.stringValue = new.text
