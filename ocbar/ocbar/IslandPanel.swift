@@ -5997,9 +5997,12 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         optionsDocument.frame = NSRect(x: 0, y: 0, width: fullWidth, height: rowsHeight)
         // The text field follows the rows it was opened from, on the same column, so the options stay
         // visible and clickable under the pointer while the answer is typed.
-        textField.frame = NSRect(x: 0,
+        // The typed row starts where the option labels start, not at the row's edge: it stands in the
+        // list, so its text has to sit on the same left edge as the rows above it.
+        textField.frame = NSRect(x: IslandQuestionOptionView.textLeftInset,
                                  y: y + visibleOptionsHeight + (content.textEntry ? islandQuestionGap : 0),
-                                 width: fullWidth, height: islandQuestionTextHeight)
+                                 width: max(0, fullWidth - IslandQuestionOptionView.textLeftInset * 2),
+                                 height: islandQuestionTextHeight)
         var optionY: CGFloat = 0
         for (option, view) in zip(field.options, optionViews) where !view.isHidden {
             let h = Self.optionHeight(option, width: fullWidth)
@@ -6046,6 +6049,9 @@ private final class IslandQuestionOptionView: NSView {
     /// The row's text box begins `islandQuestionOptionTextInset` in from each side and ends before the
     /// checkmark's column. Both the row's own layout and the block's height arithmetic read this one sum.
     static let textColumnInset: CGFloat = markColumnWidth + islandQuestionOptionTextInset * 2
+    /// Where a row's text starts, shared with the block's free-text row so the typed line sits on the
+    /// same left edge as the labels above it.
+    static let textLeftInset: CGFloat = islandQuestionOptionTextInset
 
     private let label = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
@@ -6114,7 +6120,9 @@ private final class IslandQuestionOptionView: NSView {
                                   width: textWidth, height: detailHeight)
         }
         let markSize = mark.image?.size ?? .zero
-        mark.frame = NSRect(x: bounds.width - markSize.width,
+        // The tick keeps the same air from the row's trailing edge as the text keeps from its leading
+        // one, so a selected row does not look like it is spilling out of the card.
+        mark.frame = NSRect(x: bounds.width - markSize.width - Self.textLeftInset,
                             y: (bounds.height - markSize.height) / 2,
                             width: markSize.width, height: markSize.height)
     }
