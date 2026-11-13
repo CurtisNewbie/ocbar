@@ -1,0 +1,39 @@
+# Issue tracker: Local Markdown
+
+Issues and specs for this repo live as markdown files in `.scratch/`.
+
+## Conventions
+
+- One feature per directory, prefixed with the day it was created: `.scratch/<YYYYMMDD>-<feature-slug>/` (e.g. `.scratch/20261104-dir-zip-download/`)
+- The spec is `.scratch/<YYYYMMDD>-<feature-slug>/spec.md`
+- Implementation issues are one file per ticket at `.scratch/<YYYYMMDD>-<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, never a single combined tickets file
+- Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
+- Comments and conversation history append to the bottom of the file under a `## Comments` heading
+
+## When a skill says "publish to the issue tracker"
+
+Create a new file under `.scratch/<YYYYMMDD>-<feature-slug>/` (creating the directory if needed). The prefix is today's date, stamped once when the directory is created and never revisited.
+
+## When a skill says "fetch the relevant ticket"
+
+Read the file at the referenced path. The user will normally pass the path or the issue number directly.
+
+## Legacy undated directories
+
+A directory whose name lacks the `YYYYMMDD-` prefix predates the rule. Rename it only when the user asks for the migration, and take each date from the repo, never from the filesystem clock:
+
+1. List the moves: every `.scratch/*/` that does not match `[0-9]{8}-*`.
+2. Date each one from the first commit that touched it: `git log --diff-filter=A --format=%as --reverse -- "<dir>" | head -1`. Nothing committed (untracked directory) → the directory's birth time: `stat -f %SB -t %Y%m%d "<dir>"` on macOS, `stat -c %w "<dir>"` on Linux.
+3. `git mv "<dir>" ".scratch/<date>-<dir>"` — plain `mv` when untracked — then rewrite every path quoting the old name in this repo's docs, including `docs/agents/*.md`, and in the ticket files that name sibling directories.
+4. Report the old → new mapping.
+
+## Wayfinding operations
+
+Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.
+
+- **Map**: `.scratch/<YYYYMMDD>-<effort>/map.md` (the Notes / Decisions-so-far / Fog body).
+- **Child ticket**: `.scratch/<YYYYMMDD>-<effort>/issues/NN-<slug>.md`, numbered from `01`, with the question in the body. A `Type:` line records the ticket type (`research`/`prototype`/`grilling`/`task`); a `Status:` line records `claimed`/`resolved`.
+- **Blocking**: a `Blocked by: NN, NN` line near the top. A ticket is unblocked when every file it lists is `resolved`.
+- **Frontier**: scan `.scratch/<YYYYMMDD>-<effort>/issues/` for files that are open, unblocked, and unclaimed; first by number wins.
+- **Claim**: set `Status: claimed` and save before any work.
+- **Resolve**: append the answer under an `## Answer` heading, set `Status: resolved`, then append a context pointer (gist + link) to the map's Decisions-so-far in `map.md`.

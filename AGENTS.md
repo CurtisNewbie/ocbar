@@ -23,3 +23,21 @@ Each file below is a decision record: the invariant, the number that is not deri
 - [`docs/island-pill.md`](docs/island-pill.md) — the collapsed pill's geometry, its server-CPU readout, and `IslandRing`, the app's one running mark.
 - [`docs/island-alert.md`](docs/island-alert.md) — the unprompted alert, what owns its fold while it is open, and its three exits.
 - [`docs/menubar-and-reminders.md`](docs/menubar-and-reminders.md) — the menubar label and the reminder chain: bubble, island, alert sound.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as local markdown under `.scratch/<YYYYMMDD>-<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default roles, name = label. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
+
+### Code review
+
+Read before writing and when reviewing code. See `docs/agents/code-review.md`.
