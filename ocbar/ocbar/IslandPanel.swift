@@ -727,9 +727,10 @@ final class IslandPanel {
     /// Enter in a list field's `Other…` row: the typed string is added to the picked values.
     var onQuestionCommit: (@MainActor (String, String, String) -> Void)?
 
-    /// Leave a field's text row without answering it: its typed answer or draft is dropped, so the
-    /// options come back. The picked values of a list field are untouched.
-    var onQuestionClear: (@MainActor (String, String) -> Void)?
+    /// Leave a field's text row without answering it, so the options come back. A text field's answer
+    /// **is** its text, so that answer goes; a multiselect's typed string is only a draft, so its picked
+    /// values stay (`dropsAnswer` false).
+    var onQuestionClear: (@MainActor (String, String, Bool) -> Void)?
 
     /// A question's fold deadline arrived for that form. **Not a dismissal:** the form stays pending
     /// and answerable, so the whole host only folds this showing, without latching the form off.
@@ -2216,7 +2217,7 @@ final class IslandPanel {
         guard let question, let field = currentField else { return }
         // Picking a row is also how the text row closes: the answer it was holding is replaced rather
         // than left behind with the rows hidden.
-        if isTyping(field) { onQuestionClear?(question.id, field.key) }
+        if isTyping(field) { onQuestionClear?(question.id, field.key, field.kind != .list) }
         if option.isOther {
             if field.kind == .list {
                 // A list's picked values stay untouched while the draft is open: `Other…` adds to
@@ -2283,7 +2284,7 @@ final class IslandPanel {
     private func cancelQuestionText() {
         guard let question, let field = currentField, isTyping(field) else { return }
         guard field.options.contains(where: { !$0.isOther }) else { return }
-        onQuestionClear?(question.id, field.key)
+        onQuestionClear?(question.id, field.key, field.kind != .list)
     }
 
     /// A chevron: step to the next or previous field of the same form. Only the field index moves —
@@ -6400,10 +6401,11 @@ final class IslandHost {
         for panel in panels { panel.applyQuestionState(questionState) }
     }
 
-    /// Leave a field's text row: the typed answer and the unconfirmed draft both go, which is what puts
-    /// the field's options back. Picked values of a list field are its answer, not its draft, and stay.
-    private func clearQuestionText(formID: String, fieldKey: String) {
-        questionState.answers[formID]?[fieldKey] = nil
+    /// Leave a field's text row. The draft always goes, which is what puts the options back; the answer
+    /// goes only when the field's answer **is** the text (`dropsAnswer`). A multiselect keeps its picked
+    /// values — its typed string was never part of them until Enter added it.
+    private func clearQuestionText(formID: String, fieldKey: String, dropsAnswer: Bool) {
+        if dropsAnswer { questionState.answers[formID]?[fieldKey] = nil }
         questionState.drafts[formID]?[fieldKey] = nil
         pushQuestionState()
     }
@@ -6527,8 +6529,8 @@ final class IslandHost {
             panel.onQuestionCommit = { [weak self] formID, fieldKey, text in
                 self?.commitDraft(formID: formID, fieldKey: fieldKey, text: text)
             }
-            panel.onQuestionClear = { [weak self] formID, fieldKey in
-                self?.clearQuestionText(formID: formID, fieldKey: fieldKey)
+            panel.onQuestionClear = { [weak self] formID, fieldKey, dropsAnswer in
+                self?.clearQuestionText(formID: formID, fieldKey: fieldKey, dropsAnswer: dropsAnswer)
             }
             panel.onQuestionHidden = { [weak self] formID in
                 self?.hideQuestion(formID)
