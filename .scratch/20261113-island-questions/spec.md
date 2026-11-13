@@ -88,8 +88,10 @@ oldest first, and the card folds once the last one settles.
   card ever takes the keyboard.
 - **A question outranks an alert.** A newly pending question preempts a card that an armed alert
   occupies; the alert's sound and row mark have already happened, so nothing is lost.
-- **Unpainted field types are named, not hidden.** A form whose only fields are outside what the card
-  renders shows the row plus one dim line saying it must be answered in the terminal.
+- **Unpainted field types are named, not hidden.** Any field outside what the card renders makes
+  the form terminal-only: the card shows the asking row plus one dim line saying it must be answered
+  in the terminal, because the reply carries the form's whole answer set and a partial one is a
+  guaranteed rejection.
 - **Ignoring field conditions is deliberate.** Hidden and conditional fields are rendered like any
   other, so the card's field set never shrinks under the user's pointer.
 - **The card ends the way an alert does.** When the last pending form settles the card folds; Hide
@@ -226,8 +228,9 @@ different fields is a new question and is offered again.
 - **OpenCode server (local).** The card reads the form list and writes the reply; the server owns form
   lifetime entirely, expiring settled forms after its own cache window. Reads carry the location
   directory that the existing scan already passes for these endpoints; the write is session-scoped.
-  Ordering is the server's (cache insertion order), so the client sorts by nothing and trusts the
-  list's own order for "oldest".
+  Within a directory the server's list order is used untouched, so "oldest" is the server's cache
+  insertion order; across directories the order is the directory order, which is the only
+  deterministic order the server exposes.
 - **Server down.** The monitor's existing behaviour governs: no service endpoint, no sessions, no
   forms, and the card empties. No retry is introduced, and a reply attempted against a vanished
   server lands in the failure path like any `404`.
