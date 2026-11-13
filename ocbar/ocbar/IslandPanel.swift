@@ -423,19 +423,26 @@ private let fakeNotchMaxWidth: CGFloat = 240
 /// real corpus rather than for the median (197pt) or the 90th percentile (279pt).
 let islandExpandedCardTargetWidth: CGFloat = 500
 
+/// Width the card aims for while it is **answering a question**: the block's prose — its heading, its
+/// option labels and their descriptions — gets the 220pt this buys before it has to truncate. The
+/// hover card keeps 500 (`islandExpandedCardTargetWidth`) because that number is sized for session
+/// titles, and a wider one there would only add black.
+let islandQuestionCardTargetWidth: CGFloat = 720
+
 /// Share of the target screen's width the card may take before it stops growing.
 /// A guard rather than a live constraint here — it only binds on screens narrower
-/// than ~625pt, and the attached displays are 1512pt and 1920pt.
+/// than ~625pt (~900pt for the 720pt question card), and the attached displays are
+/// 1512pt and 1920pt.
 private let expandedWidthFraction: CGFloat = 0.8
 
-/// Width the expanded card takes on a screen `screenWidth` wide: the derived
-/// target, bounded by `expandedWidthFraction` of the screen so a small display
-/// degrades instead of overflowing, and never narrower than `floor` (the
-/// collapsed capsule the card grows out of — 445pt on the built-in display, where the target
+/// Width the expanded card takes on a screen `screenWidth` wide: the target for the card's state
+/// (500, or `islandQuestionCardTargetWidth` while it is asking), bounded by `expandedWidthFraction`
+/// of the screen so a small display degrades instead of overflowing, and never narrower than `floor`
+/// (the collapsed capsule the card grows out of — 445pt on the built-in display, where the target
 /// 500pt still wins, so nothing about the card changes; the floor's own threshold moves from
 /// a ~470pt screen to a ~556pt one, below which the card is as wide as the pill it grew from).
-func islandExpandedCardWidth(screenWidth: CGFloat, floor: CGFloat) -> CGFloat {
-    max(floor, min(islandExpandedCardTargetWidth, screenWidth * expandedWidthFraction))
+func islandExpandedCardWidth(screenWidth: CGFloat, floor: CGFloat, target: CGFloat) -> CGFloat {
+    max(floor, min(target, screenWidth * expandedWidthFraction))
 }
 
 /// Height budget for the expanded list. Pulled out of `IslandPanel` so the rule
@@ -1328,9 +1335,14 @@ final class IslandPanel {
 
     /// Width the expanded card takes, bounded by the target screen so a small
     /// display degrades instead of overflowing, and never narrower than the
-    /// collapsed capsule.
+    /// collapsed capsule. The only input that varies is the target: a card that is
+    /// asking takes `islandQuestionCardTargetWidth`, everything else the hover card's 500.
     private func expandedCardWidth(collapsedWidth: CGFloat, metrics: ScreenMetrics) -> CGFloat {
-        islandExpandedCardWidth(screenWidth: metrics.screen.frame.width, floor: collapsedWidth)
+        islandExpandedCardWidth(
+            screenWidth: metrics.screen.frame.width,
+            floor: collapsedWidth,
+            target: questionArmed ? islandQuestionCardTargetWidth : islandExpandedCardTargetWidth
+        )
     }
 
     private func cornerRadius(expanded: Bool, metrics: ScreenMetrics) -> CGFloat {
