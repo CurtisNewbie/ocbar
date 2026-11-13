@@ -215,6 +215,21 @@ enum QuestionFieldKind: Equatable {
     case unsupported
 }
 
+/// The field types the server's `Form.Field` carries. Three are drawn; the rest are
+/// named as terminal-only rather than dropped, so the card never offers a half-answer.
+enum QuestionFieldType: String {
+    case string
+    case number
+    case integer
+    case boolean
+    case multiselect
+    case external
+}
+
+/// The option values a server sends for a boolean field's true side. A boolean answer is
+/// a JSON bool, so an option's own value has to be read as one.
+private let questionTruthyValues: Set<String> = ["true", "1", "yes"]
+
 /// One field of a pending form, resolved into what the card draws.
 struct QuestionField: Equatable {
     let key: String
@@ -224,8 +239,13 @@ struct QuestionField: Equatable {
     let kind: QuestionFieldKind
     /// Answer rows, `Other…` last. Empty for a field the card cannot render.
     let options: [QuestionOption]
+    /// The server's pre-selected answer, in the field's own shape. The card starts from it,
+    /// so a required field the server already answered does not hold `Send` back forever.
+    let defaultAnswer: QuestionAnswer?
 
-    /// Whether `Other…` is the last row: only a text field can carry a typed answer.
+    /// Whether `Other…` can swap this field for its text field: a text field's answer is the typed
+    /// text itself. A list field has the row too, but its typed answer is a draft added to the
+    /// picked values on confirm, so the card tracks that mode with the host's `drafts` instead.
     var allowsText: Bool { kind == .text && (options.last?.isOther ?? false) }
 
     /// Whether the card draws this field as its text field, which is two cases:
@@ -268,6 +288,17 @@ struct PendingQuestion: Equatable {
     /// The server payload's own bytes. A form re-asked under the same id with
     /// different fields is a different question; an identical one is the same.
     let payload: String
+
+    /// The fields the server pre-answered, by key — what the card starts with before the user
+    /// touches anything. Duplicate keys (a malformed payload) keep the first, rather than crash.
+    var defaultAnswers: [String: QuestionAnswer] {
+        var result: [String: QuestionAnswer] = [:]
+        for field in fields {
+            guard let answer = field.defaultAnswer, result[field.key] == nil else { continue }
+            result[field.key] = answer
+        }
+        return result
+    }
 }
 
 /// The card's heading for a field: its short title, else the question itself.
@@ -319,7 +350,7 @@ private func questionField(from json: [String: Any]) -> QuestionField? {
             let label = (option["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? value
             let detail = (option["description"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             // A boolean answer is a JSON bool, so the option's own value has to be read as one.
-            let truthy = ["true", "1", "yes"].contains(value.lowercased())
+            let truthy = questionTruthyValues.contains(value.lowercased())
             return QuestionOption(value: value, label: label, detail: detail, isOther: false,
                                   flag: flag.map { _ in truthy })
         }
@@ -327,8 +358,8 @@ private func questionField(from json: [String: Any]) -> QuestionField? {
 
     let kind: QuestionFieldKind
     var rows: [QuestionOption]
-    switch json["type"] as? String {
-    case "string":
+    switch QuestionFieldType(rawValue: json["type"] as? String ?? "") {
+    case .string:
         kind = .text
         rows = options()
         if custom {
@@ -336,9 +367,9 @@ private func questionField(from json: [String: Any]) -> QuestionField? {
                                        detail: nil, isOther: true, flag: nil))
         } else if rows.isEmpty {
             return QuestionField(key: key, heading: heading, required: required,
-                                 kind: .unsupported, options: [])
+                                 kind: .unsupported, options: [], defaultAnswer: nil)
         }
-    case "boolean":
+    case .boolean:
         kind = .flag
         rows = options(true)
         if rows.isEmpty {
@@ -347,17 +378,36 @@ private func questionField(from json: [String: Any]) -> QuestionField? {
                 QuestionOption(value: "false", label: "No", detail: nil, isOther: false, flag: false)
             ]
         }
-    case "multiselect":
-        // Free text has no meaning for a list answer, so `Other…` is a text field's row only.
+    case .multiselect:
+        // `custom` allows values that are not among the options — the server accepts arbitrary
+        // strings in the array — so the list gets the same `Other…` row a text field has.
         kind = .list
         rows = options()
-        if rows.isEmpty { return QuestionField(key: key, heading: heading, required: required,
-                                              kind: .unsupported, options: []) }
-    default:
+        if custom {
+            rows.append(QuestionOption(value: "", label: islandQuestionOtherLabel,
+                                       detail: nil, isOther: true, flag: nil))
+        } else if rows.isEmpty {
+            return QuestionField(key: key, heading: heading, required: required,
+                                 kind: .unsupported, options: [], defaultAnswer: nil)
+        }
+    case .number, .integer, .external, .none:
         return QuestionField(key: key, heading: heading, required: required,
-                             kind: .unsupported, options: [])
+                             kind: .unsupported, options: [], defaultAnswer: nil)
     }
-    return QuestionField(key: key, heading: heading, required: required, kind: kind, options: rows)
+    return QuestionField(key: key, heading: heading, required: required, kind: kind, options: rows,
+                         defaultAnswer: questionDefaultAnswer(kind: kind, json: json))
+}
+
+/// The server's `default`, in the shape the field's answer takes. Absent — or in a shape the
+/// card cannot answer — is no default at all, never an empty answer that would read as one.
+private func questionDefaultAnswer(kind: QuestionFieldKind, json: [String: Any]) -> QuestionAnswer? {
+    guard let raw = json["default"] else { return nil }
+    switch kind {
+    case .text: return (raw as? String).map { .text($0) }
+    case .flag: return (raw as? Bool).map { .flag($0) }
+    case .list: return (raw as? [String]).map { .list($0) }
+    case .unsupported: return nil
+    }
 }
 
 struct SessionInfo: Equatable {
