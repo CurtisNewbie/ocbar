@@ -252,6 +252,11 @@ class SessionMonitor {
     /// filters them out) — a failed submit never retries and never re-offers the same payload. The
     /// session stays in the waiting state: the server is still blocked on the form.
     private var failedForms: [String: String] = [:]
+    /// Arrival stamps for the forms still pending, by form id, from a counter of its own. The server
+    /// exposes no order across directories and the rows are ranked by attention, so this is what makes
+    /// "oldest first" true: a question asked later never takes the card from one already waiting.
+    private var formArrivals: [String: UInt64] = [:]
+    private var nextFormArrival: UInt64 = 0
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
@@ -496,13 +501,28 @@ class SessionMonitor {
                     input.waiting.insert(sessionID)
                     // The form list is already fetched; only the payload was being
                     // thrown away. Reading it here costs no request.
-                    if entry.forms, let question = pendingQuestion(from: item) {
+                    if entry.forms, var question = pendingQuestion(from: item) {
+                        question.arrival = arrivalOrder(for: question.id)
                         input.questions.append(question)
                     }
                 }
             }
         }
+        // Stamps for forms that are gone die with them: the map is bounded by what is pending, not by
+        // everything the desk has ever asked.
+        let live = Set(input.questions.map(\.id))
+        formArrivals = formArrivals.filter { live.contains($0.key) }
         return input
+    }
+
+    /// When a form was first seen, on a counter of its own. Keyed by form id, so a form keeps its
+    /// place in the queue for as long as it stays pending — a second session asking afterwards is
+    /// behind the first, whichever directory it came from and however the rows are ranked.
+    private func arrivalOrder(for formID: String) -> UInt64 {
+        if let stamp = formArrivals[formID] { return stamp }
+        nextFormArrival += 1
+        formArrivals[formID] = nextFormArrival
+        return nextFormArrival
     }
 
     /// The pending user input one scan tick found: which sessions are blocked, and

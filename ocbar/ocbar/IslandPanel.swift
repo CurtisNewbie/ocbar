@@ -1500,12 +1500,15 @@ final class IslandPanel {
     /// Panel-local state (`questionFieldIndex`) is reset when the form changes, so a
     /// queued form never opens on the field the previous one was left on.
     private func resolveQuestion(in ranked: [IslandRow]) {
+        // **Arrival order, not row order.** Rows are attention-ranked, so the session that asked last
+        // can rank above one that asked first; the card must still stay on the question already waiting
+        // for an answer. The monitor stamps each form when it first sees it.
         var head: PendingQuestion?
         var total = 0
         for row in ranked {
             for form in row.questions {
                 total += 1
-                if head == nil { head = form }
+                if head == nil || form.arrival < head!.arrival { head = form }
             }
         }
         // A hidden form asks nothing at all — not a later one in the queue behind it, which would
@@ -5577,11 +5580,14 @@ private func islandWrappedHeight(_ text: String, font: NSFont, width: CGFloat, m
 /// The block's three type tiers, as font objects: the question/option label at the card's base size,
 /// and the option detail and queue counter at its subordinate one. `height(for:)` measures
 /// with these same fonts, so a line counted and a line drawn cannot come from two different faces.
-private let islandQuestionBodyFont = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .medium)
+private let islandQuestionTitleFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
+/// Option labels keep the card's base size: the question is the block's heading, and the rows under it
+/// are answers — the same size for both would leave the card with no head.
 private let islandQuestionOptionLabelFont = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .regular)
 private let islandQuestionSecondaryFont = NSFont.systemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
 private let islandQuestionQueueFont = NSFont.monospacedDigitSystemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
-private let islandQuestionBodyLineHeight = islandLabelLineHeight(islandQuestionBodyFont)
+private let islandQuestionTitleLineHeight = islandLabelLineHeight(islandQuestionTitleFont)
+private let islandQuestionOptionLabelLineHeight = islandLabelLineHeight(islandQuestionOptionLabelFont)
 private let islandQuestionSecondaryLineHeight = islandLabelLineHeight(islandQuestionSecondaryFont)
 
 /// Padding above and below an option row's text. With no separator between rows this is the whole gap
@@ -5601,12 +5607,12 @@ private let islandQuestionOptionTextInset: CGFloat = 6
 /// 4 × (2 × 8 padding + 15 label + 2 × 14 detail) = 236, so an ordinary form shows every option and
 /// nothing is half-clipped before the scrollbar takes over.
 private let islandQuestionOptionsMaxHeight: CGFloat =
-    4 * (islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight + 2 * islandQuestionSecondaryLineHeight)
+    4 * (islandQuestionOptionVerticalPadding * 2 + islandQuestionOptionLabelLineHeight + 2 * islandQuestionSecondaryLineHeight)
 private let islandQuestionEmptyLineHeight: CGFloat = 15
 /// Height of the free-text answer field: one **label-only** option row, so `Other…` swapping the rows
 /// for the field never moves the card by a hair.
 private let islandQuestionTextHeight: CGFloat =
-    islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight
+    islandQuestionOptionVerticalPadding * 2 + islandQuestionOptionLabelLineHeight
 private let islandQuestionStepButtonSize: CGFloat = 20
 /// Shown inside the card's one editable field before anything is typed. Without it the block would
 /// open a caret on black with nothing saying what it is for.
@@ -5674,7 +5680,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     /// screen degrades to a scrolling list instead of pushing the card's footer off the bottom.
     static func height(for content: Content, width: CGFloat, maxHeight: CGFloat) -> CGFloat {
         let textWidth = headerTextWidth(content, width: width)
-        let header = islandWrappedHeight(content.body, font: islandQuestionBodyFont, width: textWidth, maxLines: 3)
+        let header = islandWrappedHeight(content.body, font: islandQuestionTitleFont, width: textWidth, maxLines: 3)
         guard content.answerable, content.field != nil else {
             return islandQuestionTopGap + header
                 + islandQuestionGap + islandQuestionEmptyLineHeight
@@ -5771,7 +5777,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         // The question's own white: the bright line is what the user is being asked, and the card's
         // existing α0.92 tone carries it without a new alpha. It wraps to three lines and truncates
         // there rather than running the card taller than the list budget pays for.
-        bodyLabel.font = islandQuestionBodyFont
+        bodyLabel.font = islandQuestionTitleFont
         bodyLabel.textColor = NSColor.white.withAlphaComponent(0.92)
         bodyLabel.lineBreakMode = .byTruncatingTail
         bodyLabel.usesSingleLineMode = false
@@ -5962,7 +5968,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         // `height(for:)` measures with.
         let headerWidth = content.map { Self.headerTextWidth($0, width: fullWidth) } ?? fullWidth
         if let content {
-            let bodyHeight = islandWrappedHeight(content.body, font: islandQuestionBodyFont,
+            let bodyHeight = islandWrappedHeight(content.body, font: islandQuestionTitleFont,
                                                  width: headerWidth, maxLines: 3)
             bodyLabel.frame = NSRect(x: 0, y: y, width: headerWidth, height: bodyHeight)
             y += bodyHeight
@@ -5971,7 +5977,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
             let queueWidth = Self.queueWidth(content)
             let queueHeight = queueLabel.intrinsicContentSize.height
             queueLabel.frame = NSRect(x: max(0, fullWidth - queueWidth),
-                                      y: islandQuestionTopGap + (islandQuestionBodyLineHeight - queueHeight) / 2,
+                                      y: islandQuestionTopGap + (islandQuestionTitleLineHeight - queueHeight) / 2,
                                       width: queueWidth, height: queueHeight)
         }
         y += islandQuestionGap
@@ -6032,7 +6038,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         let detail = option.detail.map {
             islandWrappedHeight($0, font: islandQuestionSecondaryFont, width: textWidth, maxLines: 2)
         } ?? 0
-        return islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight
+        return islandQuestionOptionVerticalPadding * 2 + islandQuestionOptionLabelLineHeight
             + (detail > 0 ? islandQuestionOptionLabelGap : 0) + detail
     }
 }
@@ -6124,7 +6130,7 @@ private final class IslandQuestionOptionView: NSView {
         super.layout()
         let textX = islandQuestionOptionTextInset
         let textWidth = max(0, bounds.width - Self.textColumnInset)
-        let labelHeight = islandQuestionBodyLineHeight
+        let labelHeight = islandQuestionOptionLabelLineHeight
         if detail.isHidden {
             label.frame = NSRect(x: textX, y: (bounds.height - labelHeight) / 2,
                                  width: textWidth, height: labelHeight)

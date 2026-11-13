@@ -289,6 +289,10 @@ struct PendingQuestion: Equatable {
     /// The server payload's own bytes. A form re-asked under the same id with
     /// different fields is a different question; an identical one is the same.
     let payload: String
+    /// When the monitor first saw this form, as its own increasing counter. The server exposes no
+    /// order across directories, so arrival is what makes "oldest first" true: a question asked
+    /// later never takes the card from one already waiting on it.
+    var arrival: UInt64 = 0
 
     /// The fields the server pre-answered, by key — what the card starts with before the user
     /// touches anything. Duplicate keys (a malformed payload) keep the first, rather than crash.
