@@ -154,6 +154,188 @@ func compactTokens(_ value: Int) -> String {
     return "\(value)"
 }
 
+// MARK: - Pending question forms
+
+/// The last answer row of a field that allows free text, and the reason a field is
+/// never a dead end. It is a row like any other, not a mode switch in the chrome.
+let islandQuestionOtherLabel = "Other…"
+
+/// What the block says for a form it cannot answer — a field type outside the
+/// card's set (`number`, `integer`, `external`), named rather than hidden.
+let islandQuestionUnsupportedText = "Answer in terminal"
+
+/// One row the card draws for a form field's answer: a server option, the card's own
+/// `Yes`/`No` pair for a boolean, or the trailing `Other…` row that swaps the field
+/// for a text field.
+struct QuestionOption: Equatable {
+    /// The option's own value, which is what a `multiselect` answer carries.
+    let value: String
+    let label: String
+    /// The server's explanatory line, drawn dim under the label.
+    let detail: String?
+    /// `Other…`, which is not a value but a mode of the field.
+    let isOther: Bool
+    /// A boolean field's value for this row; nil for every other kind.
+    let flag: Bool?
+}
+
+/// What a field's answer is, in the three shapes the card can actually produce.
+enum QuestionAnswer: Equatable {
+    case text(String)
+    /// A boolean field's answer, and the only answer that is never "empty".
+    case flag(Bool)
+    case list([String])
+
+    /// The reply's JSON value, in the shape the contract names per field type.
+    var jsonValue: Any {
+        switch self {
+        case .text(let value): return value
+        case .flag(let value): return value
+        case .list(let values): return values
+        }
+    }
+
+    /// Whether this counts as answered for `Send`'s gate: a typed answer must be
+    /// non-empty, and a multiselect must carry at least one value.
+    var isEmpty: Bool {
+        switch self {
+        case .text(let value): return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .flag: return false
+        case .list(let values): return values.isEmpty
+        }
+    }
+}
+
+/// The four ways a field can be drawn. `unsupported` exists so the card can still
+/// name a form it cannot answer instead of dropping fields silently.
+enum QuestionFieldKind: Equatable {
+    case text
+    case flag
+    case list
+    case unsupported
+}
+
+/// One field of a pending form, resolved into what the card draws.
+struct QuestionField: Equatable {
+    let key: String
+    /// The field's short title, else its full question text.
+    let heading: String
+    let required: Bool
+    let kind: QuestionFieldKind
+    /// Answer rows, `Other…` last. Empty for a field the card cannot render.
+    let options: [QuestionOption]
+
+    /// Whether `Other…` is the last row: only a text field can carry a typed answer.
+    var allowsText: Bool { kind == .text && (options.last?.isOther ?? false) }
+}
+
+/// One pending form, resolved to the card's own model. Built from the server's
+/// `Form.Info` by `pendingQuestion(from:)`.
+struct PendingQuestion: Equatable {
+    let id: String
+    /// The session blocked on it — the reply's path segment, which is the form's
+    /// own session and not necessarily the root row it is drawn under.
+    let sessionID: String
+    let fields: [QuestionField]
+    /// Every field can be drawn and answered on the card. A form with even one
+    /// field outside that set is named instead of half-answered: the reply carries
+    /// the form's whole answer set, so a partial one is a guaranteed rejection.
+    let answerable: Bool
+    /// The server payload's own bytes. A form re-asked under the same id with
+    /// different fields is a different question; an identical one is the same.
+    let payload: String
+}
+
+/// The card's heading for a field: its short title, else the question itself.
+private func questionHeading(title: String?, description: String?, key: String) -> String {
+    for candidate in [title, description] {
+        let text = (candidate ?? "").split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        if !text.isEmpty { return text }
+    }
+    return key
+}
+
+/// The pure seam: one server form entry to the block the card renders.
+///
+/// Every decision the card's content depends on lives here — which field types it
+/// can answer, the order of the option rows, `Other…` last, the heading fallback,
+/// and whether the form is answerable at all — so it can be pinned without a view.
+func pendingQuestion(from json: [String: Any]) -> PendingQuestion? {
+    guard let id = json["id"] as? String,
+          let sessionID = json["sessionID"] as? String,
+          let rawFields = json["fields"] as? [[String: Any]], !rawFields.isEmpty else { return nil }
+    let fields = rawFields.compactMap(questionField(from:))
+    guard !fields.isEmpty else { return nil }
+    let payload = (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]))
+        .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    return PendingQuestion(
+        id: id,
+        sessionID: sessionID,
+        fields: fields,
+        answerable: fields.allSatisfy { $0.kind != .unsupported },
+        payload: payload
+    )
+}
+
+private func questionField(from json: [String: Any]) -> QuestionField? {
+    guard let key = json["key"] as? String else { return nil }
+    let heading = questionHeading(
+        title: json["title"] as? String,
+        description: json["description"] as? String,
+        key: key
+    )
+    let required = (json["required"] as? Bool) ?? false
+    let rawOptions = json["options"] as? [[String: Any]] ?? []
+    // Absent `custom` behaves as allowed; only an explicit `false` refuses free text.
+    let custom = (json["custom"] as? Bool) ?? true
+
+    func options(_ flag: Bool? = nil) -> [QuestionOption] {
+        rawOptions.compactMap { option in
+            guard let value = option["value"] as? String else { return nil }
+            let label = (option["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? value
+            let detail = (option["description"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // A boolean answer is a JSON bool, so the option's own value has to be read as one.
+            let truthy = ["true", "1", "yes"].contains(value.lowercased())
+            return QuestionOption(value: value, label: label, detail: detail, isOther: false,
+                                  flag: flag.map { _ in truthy })
+        }
+    }
+
+    let kind: QuestionFieldKind
+    var rows: [QuestionOption]
+    switch json["type"] as? String {
+    case "string":
+        kind = .text
+        rows = options()
+        if custom {
+            rows.append(QuestionOption(value: "", label: islandQuestionOtherLabel,
+                                       detail: nil, isOther: true, flag: nil))
+        } else if rows.isEmpty {
+            return QuestionField(key: key, heading: heading, required: required,
+                                 kind: .unsupported, options: [])
+        }
+    case "boolean":
+        kind = .flag
+        rows = options(true)
+        if rows.isEmpty {
+            rows = [
+                QuestionOption(value: "true", label: "Yes", detail: nil, isOther: false, flag: true),
+                QuestionOption(value: "false", label: "No", detail: nil, isOther: false, flag: false)
+            ]
+        }
+    case "multiselect":
+        // Free text has no meaning for a list answer, so `Other…` is a text field's row only.
+        kind = .list
+        rows = options()
+        if rows.isEmpty { return QuestionField(key: key, heading: heading, required: required,
+                                              kind: .unsupported, options: []) }
+    default:
+        return QuestionField(key: key, heading: heading, required: required,
+                             kind: .unsupported, options: [])
+    }
+    return QuestionField(key: key, heading: heading, required: required, kind: kind, options: rows)
+}
+
 struct SessionInfo: Equatable {
     let id: String
     var status: SessionStatus
@@ -183,6 +365,10 @@ struct SessionInfo: Equatable {
     /// Not capped here: what will not fit on screen is the renderer's problem,
     /// not the monitor's.
     var runningSubagents: Int = 0
+    /// Pending question forms this root is blocked on (its own or a descendant's),
+    /// oldest first in the server's own order. The monitor keeps the payload it
+    /// already fetched; the card draws the first one.
+    var questions: [PendingQuestion] = []
 }
 
 /// `5h36m` / `3h` / `12m` — the card's and the menu's one duration form.

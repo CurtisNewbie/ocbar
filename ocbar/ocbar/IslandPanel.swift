@@ -27,6 +27,10 @@ struct IslandRow {
     /// the monitor (`SessionInfo.runningSubagents`). Zero for a session working on
     /// its own turn, which is the common case and must render as it always did.
     let subagents: Int
+    /// The pending question forms this session is blocked on, oldest first. The card
+    /// draws the head one as a block under this row and folds every other session
+    /// away; empty means this row is an ordinary session row.
+    let questions: [PendingQuestion]
 }
 
 /// The two text fields a row shows — the folder name on the row's first line and
@@ -452,6 +456,11 @@ struct IslandListBudget {
     /// bottom of the screen by a fold that was computed without it. It used to be 0 on a card with no
     /// `Hide` button; that case is gone, and the budget now pays it always.
     let actionRowHeight: CGFloat
+    /// Content on the card that is not a session row and not the footer — today, the
+    /// question block under the waiting row. Chrome for the same reason the footer
+    /// is: the block is the card's, the rows are the list's, and a budget that
+    /// ignored the block would let the list push it off the bottom of the screen.
+    let extraContentHeight: CGFloat
     /// Tallest row in the list, so the budget can always hold one.
     let tallestRowHeight: CGFloat
     /// Share of the usable height the list may take.
@@ -469,7 +478,8 @@ struct IslandListBudget {
     /// controls ever costs a visible session row.
     var rowBudget: CGFloat {
         let soft = visibleFrame.height * fraction
-        let hard = screenFrame.maxY - visibleFrame.minY - contentTop - bottomPadding - summaryRowHeight - actionRowHeight
+        let hard = screenFrame.maxY - visibleFrame.minY - contentTop - bottomPadding - summaryRowHeight
+            - actionRowHeight - extraContentHeight
         // Always leave room for the tallest row, so the card never comes up empty.
         return max(tallestRowHeight, min(soft, hard))
     }
@@ -497,7 +507,7 @@ struct IslandListBudget {
     func cardHeight(forRowHeights heights: [CGFloat], folded: Bool) -> CGFloat {
         var height = contentTop + heights.reduce(0, +)
             + islandRowGaps(count: heights.count, gap: rowGap)
-            + actionRowHeight
+            + actionRowHeight + extraContentHeight
         if folded { height += summaryRowHeight }
         return height + bottomPadding
     }
@@ -824,6 +834,16 @@ final class IslandPanel {
     /// `+k more` count that replaces the rest come off the same calculation.
     private var visibleRows: [IslandRow] = []
     private var foldedCount = 0
+    /// The question form on the card — the head of the pending queue, oldest first —
+    /// and the ranked row it is drawn under. Both come from `recomputeFold`'s one
+    /// ranked list, exactly as the alert's scope does, so the card, its frame and its
+    /// `+k more` count cannot disagree about which session is asking.
+    private var question: PendingQuestion?
+    private var questionQueueCount = 0
+    /// Which of the form's fields the card is showing. Panel-local: each screen is its
+    /// own reading position, while the answers themselves are shared (they are the
+    /// one thing that has to agree everywhere).
+    private var questionFieldIndex = 0
     private var lastSignature: String?
     private var expandedState = false
     private var visible = false
@@ -1243,11 +1263,12 @@ final class IslandPanel {
     /// all — lands here with no rows and scopes on the first tick that has the row (`update`).
     private func recomputeFold(metrics: ScreenMetrics) {
         let ranked = Self.attentionRanked(rows)
+        resolveQuestion(in: ranked)
         // The rows this card is allowed to list, and the sessions already folded away before the budget is
-        // applied — 0, or the rest of the list when an alert pinned one row out of it.
+        // applied — 0, or the rest of the list when one row is pinned out of it.
         let listed: [IslandRow]
         let foldedAway: Int
-        if let focused = alertScopedIndex(in: ranked) {
+        if let focused = questionScopedIndex(in: ranked) ?? alertScopedIndex(in: ranked) {
             listed = [ranked[focused]]
             foldedAway = ranked.count - 1
         } else {
@@ -1258,6 +1279,34 @@ final class IslandPanel {
         let budget = listBudget(for: metrics, tallestRowHeight: heights.max() ?? islandRowOneLineHeight)
         visibleRows = Array(listed.prefix(budget.visibleCount(forRowHeights: heights)))
         foldedCount = max(0, foldedAway + listed.count - visibleRows.count)
+    }
+
+    /// The head of the pending question queue: the oldest form of the first ranked row
+    /// that carries one, and its position. Resolved here because it is the fold's other
+    /// input — a pending question scopes the card exactly as an armed alert does, and
+    /// **outranks it**: the form is the one thing that has to be answered.
+    ///
+    /// Panel-local state (`questionFieldIndex`) is reset when the form changes, so a
+    /// queued form never opens on the field the previous one was left on.
+    private func resolveQuestion(in ranked: [IslandRow]) {
+        var head: PendingQuestion?
+        var total = 0
+        for row in ranked {
+            for form in row.questions {
+                total += 1
+                if head == nil { head = form }
+            }
+        }
+        if head?.id != question?.id { questionFieldIndex = 0 }
+        question = head
+        questionQueueCount = total
+    }
+
+    /// Where the asking row sits in the ranked list. Nil when nothing is pending, which
+    /// is what hands the card back to the whole list (or to an alert).
+    private func questionScopedIndex(in ranked: [IslandRow]) -> Int? {
+        guard let question else { return nil }
+        return ranked.firstIndex { row in row.questions.contains { $0.id == question.id } }
     }
 
     /// The alerted row's position in the ranked list, or nil when the alert cannot be pinned to one.
@@ -1281,6 +1330,7 @@ final class IslandPanel {
             rowGap: islandRowGap,
             summaryRowHeight: summaryRowHeight,
             actionRowHeight: actionRowHeight,
+            extraContentHeight: questionBlockHeight,
             tallestRowHeight: tallestRowHeight,
             fraction: listHeightFraction
         )
@@ -1398,6 +1448,9 @@ final class IslandPanel {
         if let empty = card.emptyStateView, empty.alphaValue != alpha {
             empty.alphaValue = alpha
         }
+        if let question = card.questionView, question.alphaValue != alpha {
+            question.alphaValue = alpha
+        }
         if let summary = card.summaryView, summary.alphaValue != alpha {
             summary.alphaValue = alpha
         }
@@ -1448,6 +1501,68 @@ final class IslandPanel {
         card.addSubview(view)
         card.emptyStateView = view
         return true
+    }
+
+    /// The block the card draws for the head question, or nil when nothing is asking.
+    ///
+    /// One construction feeds both the view and the height the card budgets
+    /// (`questionBlockHeight` → `IslandListBudget`), so what is measured and what is
+    /// drawn cannot drift — the same rule the row heights and the empty line follow.
+    ///
+    /// The queue's position is always `1`: a settled form leaves the server's list, and
+    /// the card only ever draws the head, so `1 of 3` is literally where the shown form
+    /// sits in the queue.
+    private func questionContent() -> IslandQuestionView.Content? {
+        guard let question else { return nil }
+        let fields = question.fields
+        let index = fields.indices.contains(questionFieldIndex) ? questionFieldIndex : 0
+        let field = fields.isEmpty ? nil : fields[index]
+        return IslandQuestionView.Content(
+            formID: question.id,
+            heading: field?.heading ?? "",
+            fieldIndex: index,
+            fieldCount: fields.count,
+            queueIndex: 1,
+            queueCount: questionQueueCount,
+            field: field,
+            answerable: question.answerable,
+            steppable: false
+        )
+    }
+
+    /// Height the question block costs the card right now. Zero when nothing is
+    /// asking, which is every card that is not a question card.
+    private var questionBlockHeight: CGFloat {
+        questionContent().map(IslandQuestionView.height(for:)) ?? 0
+    }
+
+    /// Add, refresh or drop the question block under the waiting row, and report
+    /// whether the card's height changed so an open card can be resized.
+    ///
+    /// Content like the empty line, and created/removed by this one path: it is not a
+    /// row, it has no glyph column and its height is its own — so the card reads it
+    /// from `questionView`, and nothing here goes through the row signature.
+    @discardableResult
+    private func syncQuestion() -> Bool {
+        guard let card else { return false }
+        guard let content = questionContent() else {
+            guard let view = card.questionView else { return false }
+            view.removeFromSuperview()
+            card.questionView = nil
+            return true
+        }
+        let view: IslandQuestionView
+        if let existing = card.questionView {
+            view = existing
+        } else {
+            view = IslandQuestionView(frame: .zero)
+            // The alpha is set on creation, not left to `rebuildRows`: this can be created on a fold the
+            // row path does not run, and a folded card keeps its content views at alpha 0.
+            view.alphaValue = expandedState ? 1 : 0
+            card.addSubview(view)
+            card.questionView = view
+        }
+        return view.configure(content)
     }
 
     /// The collapsed pill's readouts, as one dictionary: how many sessions are in
@@ -1602,6 +1717,7 @@ final class IslandPanel {
         // either (`IslandCardView.hitTest` gates on the same alpha).
         var contentViews: [NSView] = rowViews
         if let empty = card.emptyStateView { contentViews.append(empty) }
+        if let question = card.questionView { contentViews.append(question) }
         if let summary = card.summaryView { contentViews.append(summary) }
         contentViews.append(card.settingsButton)
         if let actionButton = card.actionButton { contentViews.append(actionButton) }
@@ -1836,11 +1952,17 @@ final class IslandPanel {
         recomputeFold(metrics: currentMetrics())
         var emptyChanged = false
         if let card { emptyChanged = rebuildEmptyState(in: card) }
+        // The question block is content like the empty line and outside the row
+        // signature: the signature signs the *rows*, and a selection or a field step
+        // changes no row at all.
+        let questionChanged = syncQuestion()
         let signature = Self.signature(for: visibleRows, folded: foldedCount)
-        guard signature != lastSignature else { return emptyChanged }
-        lastSignature = signature
-        rebuildRows()
-        return true
+        if signature != lastSignature {
+            lastSignature = signature
+            rebuildRows()
+            return true
+        }
+        return emptyChanged || questionChanged
     }
 
     /// Mark the alerted row and clear the mark from every other row.
@@ -1908,6 +2030,13 @@ private final class IslandCardView: NSView {
     /// (`IslandPanel.syncActionRow`), and deliberately not part of `rowViews`: it is the summary row's
     /// opposite, in that it *does* claim exactly its own frame in `hitTest` while the summary claims nothing.
     var actionButton: IslandCardButton? {
+        didSet { needsLayout = true }
+    }
+    /// The question block under the waiting row, when a form is pending. Owned by the panel
+    /// (`IslandPanel.syncQuestion`): it is content, not chrome, and it sits between the rows and the
+    /// `+k more` footnote. Inert itself — `hitTest` descends into it so its options and chevrons get
+    /// their clicks — and its height is `height`, the number the panel budgets.
+    var questionView: IslandQuestionView? {
         didSet { needsLayout = true }
     }
     /// The footer's gear, and the card's only control that is **always** there. Created here rather than
@@ -1995,6 +2124,9 @@ private final class IslandCardView: NSView {
         // whole bug: it budgeted `emptyStateHeight` here while `layout()` left `y` alone, so `footerY`
         // landed one row above the card's bottom edge and the gear floated there over an empty gap.
         if rowViews.isEmpty, emptyStateView != nil { total += emptyStateHeight }
+        // The question block sits between the waiting row and the `+k more` footnote, and its own
+        // height includes the air above it — `layout()` advances by exactly this number.
+        if let questionView { total += questionView.height }
         if summaryView != nil { total += summaryRowHeight }
         total += actionRowHeight
         return total + bottomPadding
@@ -2044,6 +2176,12 @@ private final class IslandCardView: NSView {
         for view in rowViews.reversed() where view.alphaValue > 0.5 && view.frame.contains(local) {
             return view
         }
+        // The question block, descended into: its option rows, chevrons and text field are the
+        // controls, and a click on its blank parts must not fall through to the card's toggle — the
+        // block is a form, not padding.
+        if let questionView, questionView.alphaValue > 0.5, questionView.frame.contains(local) {
+            return questionView.hitTest(local) ?? questionView
+        }
         return self
     }
 
@@ -2068,6 +2206,18 @@ private final class IslandCardView: NSView {
             // row tall, and `emptyStateHeight` is the same number `contentHeight` counted for it.
             emptyStateView.frame = NSRect(x: inset, y: y, width: width, height: emptyStateHeight)
             y += emptyStateHeight
+        }
+        if let questionView {
+            // Under the waiting row, in that row's **text column** — the block belongs to the row above
+            // it rather than to the list, and its own leading air is inside `height`.
+            let qInset = islandRowTextInset
+            questionView.frame = NSRect(
+                x: qInset,
+                y: y,
+                width: max(0, bounds.width - qInset - islandRowTrailingInset),
+                height: questionView.height
+            )
+            y += questionView.height
         }
         if let summaryView {
             summaryView.frame = NSRect(x: inset, y: y, width: width, height: summaryRowHeight)
@@ -4799,6 +4949,410 @@ private func islandTinted(_ image: NSImage, color: NSColor) -> NSImage {
         NSBezierPath(rect: rect).fill()
         return true
     }
+}
+
+// MARK: - Question block
+
+/// The question block's own geometry. It sits under the waiting session's row, in that row's text
+/// column, and is the only content on the card that is neither a row nor chrome.
+///
+/// `topGap` is the block's air above itself and is **part of its height**, not the card's `rowGap`:
+/// the block is not a row, and `rowGap` exists to separate rows. The heading is one line and is
+/// truncated rather than wrapped — a form's short title is its heading, and a long question text
+/// already loses to the terminal at that point.
+private let islandQuestionTopGap: CGFloat = 8
+private let islandQuestionHeadingHeight: CGFloat = 17
+private let islandQuestionNavHeight: CGFloat = 20
+private let islandQuestionGap: CGFloat = 4
+private let islandQuestionOptionHeight: CGFloat = 26
+private let islandQuestionOptionDetailHeight: CGFloat = 38
+/// Most the options may take before they scroll. The card's list budget owns how tall the card may get
+/// and pays the block's whole height (`IslandListBudget.extraContentHeight`); this is the block's own
+/// cap inside that, sized to a few two-line options. Options scroll rather than clip past it.
+private let islandQuestionOptionsMaxHeight: CGFloat = 132
+private let islandQuestionEmptyLineHeight: CGFloat = 15
+private let islandQuestionStepButtonSize: CGFloat = 20
+
+/// The pending question, drawn under the waiting session's row: the field's heading, the field
+/// stepper (`‹ 1 / 2 ›`) and the field's answer rows — or, for a form the card cannot answer, one dim
+/// line saying so.
+///
+/// **Every control lives in this one view**, which is why the card's `hitTest` descends into it
+/// instead of claiming it whole: the option rows, the chevrons and the free-text field are the things
+/// that get clicked, and the parts of the block between them must swallow the click rather than fall
+/// through to the card's open/close toggle.
+///
+/// The block is **content, not a row**: it has no status glyph, no age and no click-to-focus, and its
+/// selected answers live outside it (the host's `IslandQuestionState`), so a render tick repaints the
+/// block without owning anything the user has picked.
+private final class IslandQuestionView: NSView {
+
+    /// Everything the block draws, as one value: it is what `configure` compares, so a tick that
+    /// changes nothing touches no view.
+    struct Content: Equatable {
+        let formID: String
+        /// The current field's heading — the field's short title, else its question text.
+        let heading: String
+        let fieldIndex: Int
+        let fieldCount: Int
+        /// This form's position among all pending forms (`1 of 3`), oldest first.
+        let queueIndex: Int
+        let queueCount: Int
+        let field: QuestionField?
+        /// Whether every field can be drawn and answered here. False draws the one dim line.
+        let answerable: Bool
+        /// Whether the chevrons do anything. False draws them inert — the card still shows which
+        /// field it is on and how many there are.
+        let steppable: Bool
+    }
+
+    /// The form's height for the state it is in. The panel reads this for the card's own height
+    /// (`IslandCardView.contentHeight`), so the block's frame and the card's cannot disagree.
+    static func height(for content: Content) -> CGFloat {
+        guard content.answerable, let field = content.field else {
+            return islandQuestionTopGap + islandQuestionHeadingHeight
+                + islandQuestionGap + islandQuestionEmptyLineHeight
+        }
+        return islandQuestionTopGap + islandQuestionHeadingHeight + islandQuestionGap
+            + islandQuestionNavHeight + islandQuestionGap
+            + min(optionsHeight(field.options), islandQuestionOptionsMaxHeight)
+    }
+
+    private static func optionsHeight(_ options: [QuestionOption]) -> CGFloat {
+        options.reduce(0) { $0 + ($1.detail == nil ? islandQuestionOptionHeight : islandQuestionOptionDetailHeight) }
+    }
+
+    /// The block's current height, for the card's layout and `contentHeight`. Both read this one
+    /// property, so the frame the panel animates to and the layout it draws are the same height.
+    var height: CGFloat { content.map { Self.height(for: $0) } ?? 0 }
+
+    private var content: Content?
+    private let headingLabel = NSTextField(labelWithString: "")
+    private let unsupportedLabel = NSTextField(labelWithString: islandQuestionUnsupportedText)
+    private let queueLabel = NSTextField(labelWithString: "")
+    private let counterLabel = NSTextField(labelWithString: "")
+    private let previousButton = IslandQuestionStepButton(symbol: "chevron.left")
+    private let nextButton = IslandQuestionStepButton(symbol: "chevron.right")
+    private let scroll = NSScrollView()
+    private let optionsDocument = FlippedView()
+    private var optionViews: [IslandQuestionOptionView] = []
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        headingLabel.font = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .medium)
+        headingLabel.textColor = NSColor.white.withAlphaComponent(0.92)
+        headingLabel.lineBreakMode = .byTruncatingTail
+        headingLabel.usesSingleLineMode = true
+        addSubview(headingLabel)
+
+        // The dim line for a form the card cannot answer: a sibling of the heading, not a mode.
+        unsupportedLabel.font = NSFont.systemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        unsupportedLabel.textColor = NSColor.white.withAlphaComponent(0.5)
+        unsupportedLabel.usesSingleLineMode = true
+        unsupportedLabel.isHidden = true
+        addSubview(unsupportedLabel)
+
+        // `2 of 3`: which form of the queue this is, on the heading's line at the trailing edge. It
+        // only exists when something is queued behind this one.
+        queueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        queueLabel.textColor = NSColor.white.withAlphaComponent(0.5)
+        queueLabel.alignment = .right
+        queueLabel.usesSingleLineMode = true
+        queueLabel.isHidden = true
+        addSubview(queueLabel)
+
+        // `1 / 2`: which field of this form. Between the chevrons, at the card's subordinate size,
+        // tabular so stepping never shifts it.
+        counterLabel.font = NSFont.monospacedDigitSystemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        counterLabel.textColor = NSColor.white.withAlphaComponent(0.55)
+        counterLabel.usesSingleLineMode = true
+        counterLabel.isHidden = true
+        addSubview(counterLabel)
+
+        previousButton.isHidden = true
+        nextButton.isHidden = true
+        addSubview(previousButton)
+        addSubview(nextButton)
+
+        // Options scroll inside the block rather than clipping: a form with twelve options is a
+        // form, and the card's height stays the card's.
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.verticalScrollElasticity = .none
+        scroll.horizontalScrollElasticity = .none
+        scroll.borderType = .noBorder
+        scroll.documentView = optionsDocument
+        scroll.isHidden = true
+        addSubview(scroll)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    /// Point the block at a form state. Returns whether the block's **height** changed, which is the
+    /// one thing the card has to act on; a repaint inside the same height is the block's own.
+    @discardableResult
+    func configure(_ new: Content) -> Bool {
+        let heightChanged = content.map { Self.height(for: $0) } != Self.height(for: new)
+        guard content != new else { return false }
+        content = new
+
+        headingLabel.stringValue = new.heading
+        queueLabel.isHidden = new.queueCount <= 1
+        queueLabel.stringValue = "\(new.queueIndex) of \(new.queueCount)"
+        unsupportedLabel.isHidden = new.answerable
+        let showsNav = new.answerable && new.field != nil
+        counterLabel.isHidden = !showsNav
+        counterLabel.stringValue = "\(new.fieldIndex + 1) / \(max(new.fieldCount, 1))"
+        previousButton.isHidden = !showsNav
+        nextButton.isHidden = !showsNav
+        previousButton.isEnabled = new.steppable && new.fieldIndex > 0
+        nextButton.isEnabled = new.steppable && new.fieldIndex + 1 < new.fieldCount
+        scroll.isHidden = !(showsNav && !(new.field?.options.isEmpty ?? true))
+
+        rebuildOptions()
+        needsLayout = true
+        return heightChanged
+    }
+
+    private func rebuildOptions() {
+        for view in optionViews { view.removeFromSuperview() }
+        optionViews = []
+        guard let content, content.answerable, let field = content.field else { return }
+        for option in field.options {
+            let view = IslandQuestionOptionView(frame: .zero)
+            view.configure(option: option, selected: false)
+            optionsDocument.addSubview(view)
+            optionViews.append(view)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        var y = islandQuestionTopGap
+        let fullWidth = max(0, bounds.width)
+
+        // `2 of 3` takes the heading line's trailing end, so the heading truncates before it rather
+        // than running under it.
+        let queueWidth = queueLabel.isHidden ? 0 : islandLabelWidth(for: queueLabel)
+        let headingWidth = max(0, fullWidth - (queueLabel.isHidden ? 0 : queueWidth + islandRowGlyphGap))
+        let headingSize = headingLabel.intrinsicContentSize
+        headingLabel.frame = NSRect(x: 0, y: y + (islandQuestionHeadingHeight - headingSize.height) / 2,
+                                    width: headingWidth, height: headingSize.height)
+        y += islandQuestionHeadingHeight
+
+        if !queueLabel.isHidden {
+            let size = queueLabel.intrinsicContentSize
+            queueLabel.frame = NSRect(x: max(0, fullWidth - queueWidth),
+                                      y: islandQuestionTopGap + (islandQuestionHeadingHeight - size.height) / 2,
+                                      width: queueWidth, height: size.height)
+        }
+        y += islandQuestionGap
+
+        guard let content, content.answerable, let field = content.field else {
+            let size = unsupportedLabel.intrinsicContentSize
+            unsupportedLabel.frame = NSRect(x: 0, y: y + (islandQuestionEmptyLineHeight - size.height) / 2,
+                                            width: fullWidth, height: size.height)
+            return
+        }
+
+        let navY = y
+        previousButton.frame = NSRect(x: 0, y: navY + (islandQuestionNavHeight - islandQuestionStepButtonSize) / 2,
+                                      width: islandQuestionStepButtonSize, height: islandQuestionStepButtonSize)
+        let counterWidth = islandLabelWidth(for: counterLabel)
+        let counterSize = counterLabel.intrinsicContentSize
+        counterLabel.frame = NSRect(x: islandQuestionStepButtonSize + islandQuestionGap,
+                                    y: navY + (islandQuestionNavHeight - counterSize.height) / 2,
+                                    width: counterWidth, height: counterSize.height)
+        nextButton.frame = NSRect(x: counterLabel.frame.maxX + islandQuestionGap,
+                                  y: previousButton.frame.minY,
+                                  width: islandQuestionStepButtonSize, height: islandQuestionStepButtonSize)
+        y += islandQuestionNavHeight + islandQuestionGap
+
+        let optionsHeight = min(Self.optionsHeight(field.options), islandQuestionOptionsMaxHeight)
+        scroll.frame = NSRect(x: 0, y: y, width: fullWidth, height: optionsHeight)
+        optionsDocument.frame = NSRect(x: 0, y: 0, width: fullWidth,
+                                       height: max(optionsHeight, Self.optionsHeight(field.options)))
+        var optionY: CGFloat = 0
+        for (option, view) in zip(field.options, optionViews) {
+            let h = Self.optionHeight(option)
+            view.frame = NSRect(x: 0, y: optionY, width: fullWidth, height: h)
+            optionY += h
+        }
+        // The list is read from its first option every time the field changes; a scroll offset
+        // carried over from the previous field would open the new one halfway down.
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 0))
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
+    private static func optionHeight(_ option: QuestionOption) -> CGFloat {
+        option.detail == nil ? islandQuestionOptionHeight : islandQuestionOptionDetailHeight
+    }
+}
+
+/// A flipped container for the scroll's document: options stack from the top down, like everything
+/// else in this file.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// One answer row inside the question block: the option's label, its dim explanatory line, and a
+/// checkmark at the trailing edge when it is the picked answer.
+///
+/// It is a **row of a form**, not a session row: same hover wash (`islandHoverWash…`) and the same
+/// pointing hand, because both are the card's one way of saying "this is clickable", but no status
+/// glyph, no age, and a selection mark instead of a focus action.
+private final class IslandQuestionOptionView: NSView {
+    var onSelect: (@MainActor () -> Void)?
+
+    private let label = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private let mark = NSImageView()
+    private var tracking: NSTrackingArea?
+    private var hovering = false {
+        didSet { if hovering != oldValue { needsDisplay = true } }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        label.font = NSFont.systemFont(ofSize: islandCardBaseFontSize, weight: .regular)
+        label.textColor = NSColor.white.withAlphaComponent(0.7)
+        label.lineBreakMode = .byTruncatingTail
+        label.usesSingleLineMode = true
+        addSubview(label)
+
+        detail.font = NSFont.systemFont(ofSize: islandCardSecondaryFontSize, weight: .regular)
+        detail.textColor = NSColor.white.withAlphaComponent(0.5)
+        detail.lineBreakMode = .byTruncatingTail
+        detail.usesSingleLineMode = true
+        detail.isHidden = true
+        addSubview(detail)
+
+        mark.image = islandSymbolImage(symbol: "checkmark", color: NSColor.white.withAlphaComponent(0.9), pointSize: 10)
+        mark.imageScaling = .scaleNone
+        mark.isHidden = true
+        addSubview(mark)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    func configure(option: QuestionOption, selected: Bool) {
+        label.stringValue = option.label
+        label.textColor = NSColor.white.withAlphaComponent(selected ? 1 : 0.7)
+        detail.stringValue = option.detail ?? ""
+        detail.isHidden = option.detail == nil
+        mark.isHidden = !selected
+        toolTip = option.isOther ? "Type an answer instead of picking one" : nil
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let fullWidth = max(0, bounds.width - markWidth)
+        let labelSize = label.intrinsicContentSize
+        if detail.isHidden {
+            label.frame = NSRect(x: 0, y: (bounds.height - labelSize.height) / 2,
+                                 width: fullWidth, height: labelSize.height)
+        } else {
+            let detailSize = detail.intrinsicContentSize
+            label.frame = NSRect(x: 0, y: 6, width: fullWidth, height: labelSize.height)
+            detail.frame = NSRect(x: 0, y: 6 + labelSize.height, width: fullWidth, height: detailSize.height)
+        }
+        let markSize = mark.image?.size ?? .zero
+        mark.frame = NSRect(x: bounds.width - markSize.width,
+                            y: (bounds.height - markSize.height) / 2,
+                            width: markSize.width, height: markSize.height)
+    }
+
+    /// The trailing column the checkmark occupies. Reserved on every row of a field, so a selection
+    /// appearing or moving changes no label's width — only which row carries the tick.
+    private var markWidth: CGFloat {
+        (mark.image?.size.width ?? 0) + islandRowGlyphGap
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    // Claim the click so it never reaches the card's blank-area toggle.
+    override func mouseDown(with event: NSEvent) { onSelect?() }
+
+    // The panel is non-key and non-activating, so the first click would otherwise be swallowed.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard hovering else { return }
+        let path = NSBezierPath(
+            roundedRect: bounds.insetBy(dx: islandHoverWashDX, dy: islandHoverWashDY),
+            xRadius: islandHoverWashRadius,
+            yRadius: islandHoverWashRadius
+        )
+        NSColor.white.withAlphaComponent(islandHoverWashAlpha).setFill()
+        path.fill()
+    }
+}
+
+/// A chevron that steps the card between a form's fields. Inert (`isEnabled` false) at either end and
+/// while there is one field: drawn dim rather than hidden, so the field counter never sits between
+/// two holes.
+private final class IslandQuestionStepButton: NSView {
+    var onStep: (@MainActor () -> Void)?
+
+    private let glyph = NSImageView()
+
+    override var isFlipped: Bool { true }
+
+    init(symbol: String) {
+        super.init(frame: .zero)
+        glyph.image = islandSymbolImage(symbol: symbol, color: NSColor.white.withAlphaComponent(0.55), pointSize: 10)
+        glyph.imageScaling = .scaleNone
+        addSubview(glyph)
+        alphaValue = 0.25
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    var isEnabled = false {
+        didSet { alphaValue = isEnabled ? 1 : 0.25 }
+    }
+
+    override func layout() {
+        super.layout()
+        let size = glyph.image?.size ?? .zero
+        glyph.frame = NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
+                             width: size.width, height: size.height)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        onStep?()
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 // MARK: - Host

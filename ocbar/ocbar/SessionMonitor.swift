@@ -353,7 +353,8 @@ class SessionMonitor {
         }
 
         let active = await activeSessions(endpoint)
-        let waiting = await waitingSessions(endpoint, sessionList: sessionList, active: active)
+        let pending = await waitingSessions(endpoint, sessionList: sessionList, active: active)
+        let waiting = pending.waiting
 
         var children: [String: [String]] = [:]
         for s in sessionList {
@@ -399,10 +400,15 @@ class SessionMonitor {
 
             guard let pid = sessionIDToPID[id] else { continue }
             let dir = (s["location"] as? [String: Any])?["directory"] as? String ?? ""
+            // The forms this root is blocked on. A form belongs to the session stuck
+            // on it — often a descendant — so it rides with the root row that
+            // represents it, in the list's own order.
+            let questions = pending.questions.filter { descendants.contains($0.sessionID) }
             sessions.append(SessionInfo(id: id, status: status, projectDir: dir, clientPID: pid,
                                         sessionTitle: s["title"] as? String,
                                         createdAt: created, updatedAt: updated,
-                                        runningSubagents: runningSubagents))
+                                        runningSubagents: runningSubagents,
+                                        questions: questions))
         }
 
         // A revert/fork leaves the original session behind as a separate root.
@@ -442,7 +448,7 @@ class SessionMonitor {
         return Set(data.keys)
     }
 
-    private func waitingSessions(_ endpoint: ServiceEndpoint, sessionList: [[String: Any]], active: Set<String>) async -> Set<String> {
+    private func waitingSessions(_ endpoint: ServiceEndpoint, sessionList: [[String: Any]], active: Set<String>) async -> PendingInput {
         let now = Date().timeIntervalSince1970 * 1000
         let previousWaiting = Set(previousStatus.compactMap { $0.value == .waiting ? $0.key : nil })
 
@@ -458,22 +464,39 @@ class SessionMonitor {
             }
         }
 
-        guard !directories.isEmpty else { return [] }
+        guard !directories.isEmpty else { return PendingInput() }
 
-        var waiting: Set<String> = []
-        for dir in directories {
+        // Sorted so the pending forms arrive in one order tick to tick: within a
+        // directory the server's list is already oldest-first, and the directories
+        // themselves have no order of their own to carry.
+        var input = PendingInput()
+        // `forms` rather than a second loop: the two lists ride one request each per directory and
+        // only one of them carries answerable payloads.
+        let paths: [(path: String, forms: Bool)] = [("api/form", true), ("api/permission/request", false)]
+        for dir in directories.sorted() {
             let query = [URLQueryItem(name: "location[directory]", value: dir)]
-            for path in ["api/form", "api/permission/request"] {
-                guard let json = await getJSON(endpoint: endpoint, path: path, query: query) as? [String: Any],
+            for entry in paths {
+                guard let json = await getJSON(endpoint: endpoint, path: entry.path, query: query) as? [String: Any],
                       let items = json["data"] as? [[String: Any]] else { continue }
                 for item in items {
-                    if let sessionID = item["sessionID"] as? String {
-                        waiting.insert(sessionID)
+                    guard let sessionID = item["sessionID"] as? String else { continue }
+                    input.waiting.insert(sessionID)
+                    // The form list is already fetched; only the payload was being
+                    // thrown away. Reading it here costs no request.
+                    if entry.forms, let question = pendingQuestion(from: item) {
+                        input.questions.append(question)
                     }
                 }
             }
         }
-        return waiting
+        return input
+    }
+
+    /// The pending user input one scan tick found: which sessions are blocked, and
+    /// the question forms themselves, oldest first.
+    private struct PendingInput {
+        var waiting: Set<String> = []
+        var questions: [PendingQuestion] = []
     }
 
     // MARK: - Feature gates
