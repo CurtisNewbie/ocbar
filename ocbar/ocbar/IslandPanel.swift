@@ -1864,6 +1864,9 @@ final class IslandPanel {
             // The alpha is set on creation, not left to `rebuildRows`: this can be created on a fold the
             // row path does not run, and a folded card keeps its content views at alpha 0.
             view.alphaValue = expandedState ? 1 : 0
+            view.onOption = { [weak self] option in self?.selectOption(option) }
+            view.onText = { [weak self] text in self?.textEntered(text) }
+            view.onStep = { [weak self] delta in self?.stepField(delta) }
             view.onCommitText = { [weak self] text in self?.commitQuestionText(text) }
             card.addSubview(view)
             card.questionView = view
