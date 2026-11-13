@@ -1013,6 +1013,10 @@ final class IslandPanel {
     /// own reading position, while the answers themselves are shared (they are the
     /// one thing that has to agree everywhere).
     private var questionFieldIndex = 0
+    /// Room the question block has on this screen before the card's footer would leave the usable
+    /// area, derived with the fold (`questionBlockRoom`). The budget pays the block this number and the
+    /// block measures itself against the same one, so a tall question scrolls inside it.
+    private var questionBlockRoomHeight: CGFloat = .greatestFiniteMagnitude
     /// What the user has picked, as the host last pushed it. Every panel draws the same
     /// set, every card's `Send` gate is computed from it, and the block's text field takes its
     /// contents from the same two places (`answers` and `drafts`).
@@ -1475,6 +1479,10 @@ final class IslandPanel {
             foldedAway = 0
         }
         let heights = listed.map(Self.rowHeight(for:))
+        // A question scopes the card to its asking row, and its `+k more` tail is shown when anything
+        // folded behind it — so this is the room the block actually has, computed once and read by
+        // both the budget and the block (`questionBlockHeight`, `syncQuestion`).
+        questionBlockRoomHeight = questionBlockRoom(for: metrics, rows: heights, tail: foldedAway > 0)
         let budget = listBudget(for: metrics, tallestRowHeight: heights.max() ?? islandRowOneLineHeight)
         visibleRows = Array(listed.prefix(budget.visibleCount(forRowHeights: heights)))
         foldedCount = max(0, foldedAway + listed.count - visibleRows.count)
@@ -1540,6 +1548,19 @@ final class IslandPanel {
             tallestRowHeight: tallestRowHeight,
             fraction: listHeightFraction
         )
+    }
+
+    /// Room the question block has on this screen: from the card's top edge to the bottom of the
+    /// usable area, less the top inset, the rows this card must show, the folded tail, the footer and
+    /// the bottom padding. It is the block's share of `IslandListBudget.rowBudget`'s `hard` term, and
+    /// the one place the block is clamped — a tall question scrolls its options inside what is left
+    /// instead of pushing the footer past the bottom of the screen. One row on a question card, by
+    /// `recomputeFold`'s scope; a hover card spends none of it (`extraContentHeight` is zero there).
+    private func questionBlockRoom(for metrics: ScreenMetrics, rows: [CGFloat], tail: Bool) -> CGFloat {
+        let usable = metrics.screen.frame.maxY - metrics.screen.visibleFrame.minY
+        return max(0, usable - contentTop(for: metrics)
+            - rows.reduce(0, +) - islandRowGaps(count: rows.count, gap: islandRowGap)
+            - (tail ? summaryRowHeight : 0) - actionRowHeight - bottomPadding)
     }
 
     /// Height of the card's footer row: the card's own short-row height, `summaryRowHeight` — the same 24
@@ -1806,7 +1827,8 @@ final class IslandPanel {
     /// placed frame the same number on a narrow screen, where the clamp makes the card narrower too.
     private func questionBlockHeight(for metrics: ScreenMetrics) -> CGFloat {
         questionContent().map {
-            IslandQuestionView.height(for: $0, width: questionBlockWidth(for: metrics))
+            IslandQuestionView.height(for: $0, width: questionBlockWidth(for: metrics),
+                                      maxHeight: questionBlockRoomHeight)
         } ?? 0
     }
 
@@ -1846,7 +1868,8 @@ final class IslandPanel {
             card.addSubview(view)
             card.questionView = view
         }
-        let changed = view.configure(content, width: questionBlockWidth(for: currentMetrics()))
+        let changed = view.configure(content, width: questionBlockWidth(for: currentMetrics()),
+                                     maxHeight: questionBlockRoomHeight)
         // The block is what shows and hides the text field, so every rebuild is also a chance to give
         // the keyboard back — a field step, a commit, a settle or a payload change.
         syncQuestionKeyboard()
@@ -5544,11 +5567,12 @@ private let islandQuestionOptionVerticalPadding: CGFloat = 8
 private let islandQuestionOptionTextInset: CGFloat = 6
 /// Most the options may take before they scroll. The card's list budget owns how tall the card may get
 /// and pays the block's whole height (`IslandListBudget.extraContentHeight`); this is the block's own
-/// cap inside that. **Three two-line options** — the shortest list that shows what a wrapped detail
-/// costs — work out as 3 × (2 × 8 padding + 15 label + 2 × 14 detail) = 177, so no option is
-/// half-clipped before the scrollbar takes over.
+/// cap inside that, and the budget's clamp (`IslandPanel.questionBlockRoom`) may take it lower still.
+/// **Four two-line options** — an ordinary question's three plus its `Other…` — work out as
+/// 4 × (2 × 8 padding + 15 label + 2 × 14 detail) = 236, so an ordinary form shows every option and
+/// nothing is half-clipped before the scrollbar takes over.
 private let islandQuestionOptionsMaxHeight: CGFloat =
-    3 * (islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight + 2 * islandQuestionSecondaryLineHeight)
+    4 * (islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight + 2 * islandQuestionSecondaryLineHeight)
 private let islandQuestionEmptyLineHeight: CGFloat = 15
 /// Height of the free-text answer field: one **label-only** option row, so `Other…` swapping the rows
 /// for the field never moves the card by a hair.
@@ -5591,6 +5615,9 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         /// Whether the chevrons do anything. False draws them inert — the card still shows which
         /// field it is on and how many there are.
         let steppable: Bool
+        /// Whether the stepper's row is drawn at all. A one-field form cannot be stepped, so the row
+        /// leaves both the drawing and the block's height rather than sitting there inert.
+        var showsStepper: Bool { fieldCount > 1 }
         /// The form's answers so far, by field key. Selection is drawn from these, so the block
         /// owns no state of its own and two screens cannot show two answers.
         let answers: [String: QuestionAnswer]
@@ -5604,21 +5631,24 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     /// The form's height for the state it is in, at the text column `width` it will be laid out in.
     /// The panel reads this for the card's own height (`IslandCardView.contentHeight`) and the block's
     /// `layout()` steps by these same helpers, so the frame and the drawing cannot disagree.
-    static func height(for content: Content, width: CGFloat) -> CGFloat {
+    ///
+    /// `maxHeight` is the room the card's budget leaves the block (`IslandPanel.questionBlockRoom`).
+    /// It clamps the answer area, which then scrolls inside what is left, so a long question on a short
+    /// screen degrades to a scrolling list instead of pushing the card's footer off the bottom.
+    static func height(for content: Content, width: CGFloat, maxHeight: CGFloat) -> CGFloat {
         let textWidth = headerTextWidth(content, width: width)
         let header = islandWrappedHeight(content.body, font: islandQuestionBodyFont, width: textWidth, maxLines: 3)
         guard content.answerable, let field = content.field else {
             return islandQuestionTopGap + header
                 + islandQuestionGap + islandQuestionEmptyLineHeight
         }
-        let body: CGFloat
-        if content.textEntry {
-            body = islandQuestionTextHeight
-        } else {
-            body = min(optionsHeight(field.options, width: width), islandQuestionOptionsMaxHeight)
-        }
-        return islandQuestionTopGap + header + islandQuestionGap
-            + islandQuestionNavHeight + islandQuestionGap + body
+        // The stepper's row and its gap are chrome only while there is more than one field to step to.
+        let chrome = islandQuestionTopGap + header + islandQuestionGap
+            + (content.showsStepper ? islandQuestionNavHeight + islandQuestionGap : 0)
+        if content.textEntry { return chrome + islandQuestionTextHeight }
+        return chrome + min(optionsHeight(field.options, width: width),
+                            islandQuestionOptionsMaxHeight,
+                            max(0, maxHeight - chrome))
     }
 
     /// Width the header's one line may use: the block's own width, less the `2 of 3` counter when the
@@ -5644,7 +5674,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
 
     /// The block's current height, for the card's layout and `contentHeight`. Both read this one
     /// property, so the frame the panel animates to and the layout it draws are the same height.
-    var height: CGFloat { content.map { Self.height(for: $0, width: width) } ?? 0 }
+    var height: CGFloat { content.map { Self.height(for: $0, width: width, maxHeight: maxHeight) } ?? 0 }
 
     /// The block's three interactions. The panel answers each with a state change; the block itself
     /// holds nothing the user picked.
@@ -5667,6 +5697,10 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     /// The header and the option rows wrap, so their height is a function of this, and the card's budget
     /// and `height` have to measure the same width or they would disagree about a line.
     private var width: CGFloat = 0
+    /// Room the block may fill, handed down from the card's budget (`IslandPanel.questionBlockRoom`).
+    /// Deliberately not part of `Content`: the room belongs to the card, not to the form, and the same
+    /// form on a short screen gets a shorter one.
+    private var maxHeight: CGFloat = .greatestFiniteMagnitude
     /// The option set currently built into `optionViews`. A change here is the only thing that
     /// rebuilds those views — a selection or a keystroke must not remove a view out from under the
     /// click or the keystroke that caused it.
@@ -5769,22 +5803,26 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     }
 
     /// Point the block at a form state, measured at `width` — the text column the card will lay it out
-    /// in. Returns whether the block's **height** changed, which is the one thing the card has to act
-    /// on; a repaint inside the same height is the block's own.
+    /// in — and clamped to `maxHeight`, the room the card's budget leaves it. Returns whether the
+    /// block's **height** changed, which is the one thing the card has to act on; a repaint inside the
+    /// same height is the block's own.
     @discardableResult
-    func configure(_ new: Content, width newWidth: CGFloat) -> Bool {
-        let heightChanged = newWidth != width
-            || content.map { Self.height(for: $0, width: width) } != Self.height(for: new, width: newWidth)
-        guard content != new || newWidth != width else { return false }
+    func configure(_ new: Content, width newWidth: CGFloat, maxHeight newMaxHeight: CGFloat) -> Bool {
+        let heightChanged = content.map { Self.height(for: $0, width: width, maxHeight: maxHeight) }
+            != Self.height(for: new, width: newWidth, maxHeight: newMaxHeight)
+        guard content != new || newWidth != width || newMaxHeight != maxHeight else { return false }
         content = new
         width = newWidth
+        maxHeight = newMaxHeight
 
         bodyLabel.stringValue = new.body
         queueLabel.isHidden = new.queueCount <= 1
         queueLabel.stringValue = "\(new.queueIndex) of \(new.queueCount)"
         unsupportedLabel.isHidden = new.answerable
         let field = new.answerable ? new.field : nil
-        let showsNav = field != nil
+        // One field has nothing to step to: the row — both chevrons and the counter — is not drawn at
+        // all, and `height(for:)` leaves its height out of the block's own arithmetic too.
+        let showsNav = field != nil && new.showsStepper
         counterLabel.isHidden = !showsNav
         counterLabel.stringValue = "\(new.fieldIndex + 1) / \(max(new.fieldCount, 1))"
         previousButton.isHidden = !showsNav
@@ -5887,21 +5925,25 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
             return
         }
 
-        let navY = y
-        previousButton.frame = NSRect(x: 0, y: navY + (islandQuestionNavHeight - islandQuestionStepButtonSize) / 2,
+        if content.showsStepper {
+            let navY = y
+            previousButton.frame = NSRect(x: 0, y: navY + (islandQuestionNavHeight - islandQuestionStepButtonSize) / 2,
+                                          width: islandQuestionStepButtonSize, height: islandQuestionStepButtonSize)
+            let counterWidth = islandLabelWidth(for: counterLabel)
+            let counterSize = counterLabel.intrinsicContentSize
+            counterLabel.frame = NSRect(x: islandQuestionStepButtonSize + islandQuestionGap,
+                                        y: navY + (islandQuestionNavHeight - counterSize.height) / 2,
+                                        width: counterWidth, height: counterSize.height)
+            nextButton.frame = NSRect(x: counterLabel.frame.maxX + islandQuestionGap,
+                                      y: previousButton.frame.minY,
                                       width: islandQuestionStepButtonSize, height: islandQuestionStepButtonSize)
-        let counterWidth = islandLabelWidth(for: counterLabel)
-        let counterSize = counterLabel.intrinsicContentSize
-        counterLabel.frame = NSRect(x: islandQuestionStepButtonSize + islandQuestionGap,
-                                    y: navY + (islandQuestionNavHeight - counterSize.height) / 2,
-                                    width: counterWidth, height: counterSize.height)
-        nextButton.frame = NSRect(x: counterLabel.frame.maxX + islandQuestionGap,
-                                  y: previousButton.frame.minY,
-                                  width: islandQuestionStepButtonSize, height: islandQuestionStepButtonSize)
-        y += islandQuestionNavHeight + islandQuestionGap
+            y += islandQuestionNavHeight + islandQuestionGap
+        }
 
         let optionsHeight = Self.optionsHeight(field.options, width: fullWidth)
-        let visibleOptionsHeight = min(optionsHeight, islandQuestionOptionsMaxHeight)
+        // `y` is the block's chrome; the options take the smaller of their own height, the block's cap
+        // and whatever of the card's room is left, so a clamped block scrolls instead of clipping.
+        let visibleOptionsHeight = min(optionsHeight, islandQuestionOptionsMaxHeight, max(0, maxHeight - y))
         scroll.frame = NSRect(x: 0, y: y, width: fullWidth, height: visibleOptionsHeight)
         optionsDocument.frame = NSRect(x: 0, y: 0, width: fullWidth, height: optionsHeight)
         // The text field takes the answer rows' place, on the same line and at the same x, so
