@@ -2242,6 +2242,12 @@ final class IslandPanel {
         case .text, .unsupported:
             onQuestionAnswer?(question.id, field.key, .text(option.value))
         }
+        // A single choice is the whole answer, so the card moves on by itself. A multiselect stays put:
+        // its rows accumulate, and stepping away after one pick would turn the second pick into a walk
+        // back. Nothing here sends — the footer's `Send` is the only write.
+        if field.kind != .list, question.fields.indices.contains(questionFieldIndex + 1) {
+            stepField(1)
+        }
     }
 
     private func currentList(of key: String, formID: String) -> [String] {
@@ -5582,6 +5588,9 @@ private let islandQuestionSecondaryLineHeight = islandLabelLineHeight(islandQues
 /// between one option's text and the next, and it is a few points more than the 6pt it shipped with so
 /// a row does not read as cramped at 640pt.
 private let islandQuestionOptionVerticalPadding: CGFloat = 8
+/// Air between an option's label and its description. The two are one answer, and without it the
+/// description reads as a second label of the same weight.
+private let islandQuestionOptionLabelGap: CGFloat = 3
 /// Air between an option row's text and the row's own edges, on both sides. The checkmark keeps its own
 /// trailing column; this is what stops the label butting the edge under the row's hover wash.
 private let islandQuestionOptionTextInset: CGFloat = 6
@@ -6023,7 +6032,8 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         let detail = option.detail.map {
             islandWrappedHeight($0, font: islandQuestionSecondaryFont, width: textWidth, maxLines: 2)
         } ?? 0
-        return islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight + detail
+        return islandQuestionOptionVerticalPadding * 2 + islandQuestionBodyLineHeight
+            + (detail > 0 ? islandQuestionOptionLabelGap : 0) + detail
     }
 }
 
@@ -6123,7 +6133,9 @@ private final class IslandQuestionOptionView: NSView {
                                                    width: textWidth, maxLines: 2)
             label.frame = NSRect(x: textX, y: islandQuestionOptionVerticalPadding,
                                  width: textWidth, height: labelHeight)
-            detail.frame = NSRect(x: textX, y: islandQuestionOptionVerticalPadding + labelHeight,
+            detail.frame = NSRect(x: textX,
+                                  y: islandQuestionOptionVerticalPadding + labelHeight
+                                      + islandQuestionOptionLabelGap,
                                   width: textWidth, height: detailHeight)
         }
         let markSize = mark.image?.size ?? .zero
