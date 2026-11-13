@@ -75,6 +75,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
     private let bubbleEnabledKey = "ocbar.bubble"
     private let alertSoundKey = "ocbar.alertSound"
     private let islandEnabledKey = "ocbar.island"
+    /// The question card, and the unprompted open it does. **On by default** — the surface that knows a
+    /// session is blocked exists to be answered — and read at use time, so the toggle applies on the
+    /// next render. Off, the waiting state and the "Question pending" notification are untouched.
+    private let questionsKey = "ocbar.questions"
     private let defaultBubbleSeconds = 10
     private let contextUsageKey = "ocbar.contextUsage"
     private let contextUsageDisplayKey = "ocbar.contextUsageDisplay"
@@ -223,6 +227,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
         menu.addItem(alertSoundMenu())
         menu.addItem(islandMenu())
         menu.addItem(islandHoverDelayMenu())
+        menu.addItem(questionsMenu())
         menu.addItem(showSessionTimeMenu())
         menu.addItem(showSessionTitlesMenu())
         menu.addItem(contextUsageMenu())
@@ -1041,6 +1046,56 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
         render(currentState, forceMenuRefresh: true)
     }
 
+    // MARK: - Questions
+
+    private var questionsEnabled: Bool {
+        (UserDefaults.standard.object(forKey: questionsKey) as? Bool) ?? true
+    }
+
+    /// The question surface's two settings, in the shape the other multi-choice settings use: a
+    /// checkable "Show questions" over the fold deadline as radio items. `Never fold` is the default —
+    /// a question card stays until it is answered or hidden — and a seconds value folds it that long
+    /// after it took the card, never paused by the pointer.
+    private func questionsMenu() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+
+        let toggle = NSMenuItem(title: "Show questions", action: #selector(questionsToggled(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.state = questionsEnabled ? .on : .off
+        submenu.addItem(toggle)
+        submenu.addItem(.separator())
+
+        let current = islandQuestionFold()
+        let never = NSMenuItem(title: "Never fold", action: #selector(questionFoldSelected(_:)), keyEquivalent: "")
+        never.target = self
+        never.tag = 0
+        never.state = current == nil ? .on : .off
+        submenu.addItem(never)
+        for seconds in islandQuestionFoldOptions {
+            let item = NSMenuItem(title: "Fold after \(seconds)s", action: #selector(questionFoldSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = seconds
+            item.state = Int(current ?? 0) == seconds ? .on : .off
+            submenu.addItem(item)
+        }
+
+        let item = NSMenuItem(title: "Questions", action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.isEnabled = true
+        return item
+    }
+
+    @objc private func questionsToggled(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(!questionsEnabled, forKey: questionsKey)
+        render(currentState, forceMenuRefresh: true)
+    }
+
+    @objc private func questionFoldSelected(_ sender: NSMenuItem) {
+        setIslandQuestionFold(seconds: sender.tag == 0 ? nil : sender.tag)
+        render(currentState, forceMenuRefresh: true)
+    }
+
     /// Milliseconds to the dropdown's label: `100` → "0.1s", `350` → "0.35s", `1000` → "1s".
     private func islandHoverDelayLabel(_ milliseconds: Int) -> String {
         String(format: "%gs", Double(milliseconds) / 1000)
@@ -1054,6 +1109,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
     private func islandRows(for sessions: [SessionInfo]) -> [IslandRow] {
         let nowMS = Date().timeIntervalSince1970 * 1000
         let names = islandRowNames(for: sessions, showTitles: showSessionTitles)
+        // Gated here rather than in the monitor: the forms are still fetched for the *waiting* state,
+        // which is a different fact from whether the card may offer to answer them.
+        let questionsShown = questionsEnabled
         return sessions.map { session in
             let naming = names[session.id]
                 ?? IslandRowName(name: sessionFolderName(for: session), title: nil)
@@ -1066,7 +1124,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
                 context: islandContext(for: session),
                 stamp: showSessionTime ? formatStampLabel(updatedMS: session.updatedAt, createdMS: session.createdAt, nowMS: nowMS) : "",
                 subagents: session.runningSubagents,
-                questions: session.questions
+                questions: questionsShown ? session.questions : []
             )
         }
     }

@@ -607,6 +607,37 @@ func setIslandHoverDelay(milliseconds: Int) {
     UserDefaults.standard.set(milliseconds, forKey: islandHoverDelayKey)
 }
 
+// MARK: - Question fold preference
+
+/// How long a question card stays on its own, as a list of choices the reader validates against.
+/// `never` is the default and is not in the list: it is the absence of a deadline, not a duration.
+///
+/// The timer is **not** the hover machine's: a question card must not fold because the pointer left —
+/// it was not opened by the pointer. It folds this long after it took the card, and nothing pauses it.
+let islandQuestionFoldOptions = [5, 10, 20, 30, 60]
+private let islandQuestionFoldKey = "ocbar.questionFold"
+private let islandQuestionFoldNever = "never"
+
+/// The question card's fold deadline, or nil for never. Read at use time (the panel arms it when a
+/// form takes the card), so a menu pick applies to the next form rather than the next launch — the
+/// same rule `islandHoverDelay()` and the feature gates follow. A value outside the list is a
+/// hand-edited default and reads as never, never as "fold immediately".
+func islandQuestionFold() -> TimeInterval? {
+    guard let raw = UserDefaults.standard.string(forKey: islandQuestionFoldKey),
+          let seconds = Int(raw), islandQuestionFoldOptions.contains(seconds) else { return nil }
+    return TimeInterval(seconds)
+}
+
+/// Write side, validated like the hover delay's: an illegal number is dropped, not stored.
+func setIslandQuestionFold(seconds: Int?) {
+    guard let seconds else {
+        UserDefaults.standard.set(islandQuestionFoldNever, forKey: islandQuestionFoldKey)
+        return
+    }
+    guard islandQuestionFoldOptions.contains(seconds) else { return }
+    UserDefaults.standard.set(String(seconds), forKey: islandQuestionFoldKey)
+}
+
 /// CodeIsland-style "Dynamic Island" surface: a borderless, non-activating
 /// panel pinned to the very top edge of **one** screen. Collapsed it hides
 /// inside that screen's notch — or, on a display with no cutout, becomes a
@@ -670,6 +701,11 @@ final class IslandPanel {
     /// hiding on one screen has to hide it on all of them, exactly as the alert's `Hide` does.
     var onQuestionHidden: (@MainActor (String) -> Void)?
 
+    /// A question's fold deadline arrived for that form. The host dismisses it the way `Hide` does —
+    /// one deadline serves every screen, so whichever panel keeps time first puts the card away on all
+    /// of them.
+    var onQuestionFoldReached: (@MainActor (String) -> Void)?
+
     /// Fired when the card's footer gear is clicked: the way into the dropdown menu while the menubar item
     /// is hidden. Answered by the app delegate, which owns the one `NSMenu` — the island does not know what
     /// the menu holds.
@@ -722,6 +758,7 @@ final class IslandPanel {
         // listed set is derived from the state that scopes it (`recomputeFold`), and the question form —
         // like `alertArmed` — is one of its inputs, so it has to be resolved before anything measures
         // the card.
+        let questionBefore = question?.id
         let contentChanged = refoldCard()
         // The footer's controls after the fold: `Hide` and `Send` exist per the card's *state*, and the
         // footer's height is the same 24 either way, so this is a layout question and not a height one.
@@ -750,6 +787,24 @@ final class IslandPanel {
         if alertArmed, !expandedState, !rows.isEmpty {
             setExpanded(true, animated: true, duration: alertExpandDuration)
         }
+        // **A pending question takes the card by itself, once per form.** Unprompted like an alert —
+        // the user did not hover — and on every screen, because the host fans this tick out to all of
+        // them. `autoOpenedQuestionID` is what keeps a card the user put away (`Hide`, a row click, the
+        // menubar opening) folded while that same form is still pending; a queued form is a new id and
+        // takes the card again.
+        if let question, question.id != autoOpenedQuestionID, visible, !rows.isEmpty {
+            autoOpenedQuestionID = question.id
+            if !expandedState {
+                setExpanded(true, animated: true, duration: alertExpandDuration)
+            }
+        }
+        // The form is gone and nothing replaced it: the card folds. `collapse()` is not this — the
+        // pointer may be anywhere, and a card the user is reading should stay readable — so it is the
+        // hover machine's decision, exactly as an alert's own timer ends (`endAlert`).
+        if questionBefore != nil, question == nil, expandedState {
+            endQuestion()
+        }
+        armQuestionTimer()
     }
 
     /// Force the card back to its collapsed state — the host calls this when the menubar menu opens, so
@@ -907,6 +962,16 @@ final class IslandPanel {
     /// become two replies; it is released when the head form changes, which is what a settled
     /// or dropped form does.
     private var submittingFormID: String?
+    /// The form this panel has already opened itself for. The unprompted open happens **once per
+    /// form**, not once per tick: a card the user dismissed — `Hide`, a row click, the menubar
+    /// opening — must stay folded while that form is still pending. A queued form has a new id, so it
+    /// takes the card again.
+    private var autoOpenedQuestionID: String?
+    /// The question's own fold deadline, and which form it was armed for. Deliberately outside
+    /// `expandWork`/`collapseWork` (the hover machine's, which `cancelPending` clears on every
+    /// expansion): a question card's fate is its form's, not the pointer's.
+    private var questionWork: DispatchWorkItem?
+    private var questionFoldFormID: String?
 
     /// Whether a form is on the card. The question card is held by its form exactly as an alert
     /// card is held by its alert: the hover poll may not fold it, a blank click may not, and the
@@ -1278,8 +1343,9 @@ final class IslandPanel {
             // happened to stay inside the collapsed hover rect, pop back 0.35s later off the 0.15s poll:
             // one click, two outcomes. It is made no click at all. Clicking a *collapsed* card to open it
             // still works — while an alert is armed only `collapse()` folds the card, and that ends the
-            // alert, so this guard only ever refuses the fold.
-            guard !(self.alertArmed && self.expandedState) else { return }
+            // alert, so this guard only ever refuses the fold. A question card makes the same argument for
+            // the same reason: its exits are `Hide` and its form settling.
+            guard !((self.alertArmed || self.questionArmed) && self.expandedState) else { return }
             self.setExpanded(!self.expandedState, animated: true)
         }
         // The footer's gear — the one control on every card, alert or not. Answered one layer up, by the
@@ -1755,6 +1821,14 @@ final class IslandPanel {
         // reasons to hide — the card says so instead, see `update` — so this is the only place an alert
         // dies with the panel.)
         clearAlert()
+        // The question's deadline dies with the panel too: it would otherwise fold a card that is not
+        // on screen, and its dismissal belongs to whoever sees the question next.
+        questionWork?.cancel()
+        questionWork = nil
+        questionFoldFormID = nil
+        // Off screen, no form has been "already opened": a question that is still pending when the
+        // island comes back takes the card again, the way an armed alert does.
+        autoOpenedQuestionID = nil
         // A dismissal latch dies with the panel too: it latches the *hover* open off, and there is
         // nothing to hover once the island is off screen — leaving it set would make a returning island
         // ignore the pointer that is still sitting where it was.
@@ -1948,16 +2022,14 @@ final class IslandPanel {
     private func scheduleCollapse() {
         expandWork?.cancel()
         expandWork = nil
-        // **An alert's card is not the hover poll's to fold.** That poll runs every
-        // 0.15s and the pointer is usually *outside* the island when an alert fires
-        // — that is what an unprompted expansion is — so without this guard the
-        // alert would be folded one `hoverCloseDelay` after it opened and nobody would ever read
-        // it. While one is armed, the alert's own timer owns the fold and hands the
-        // card back here when it ends (`endAlert`). Expansion is deliberately not
-        // guarded *by the alert*: unless a dismissal has latched the hover open off
-        // (`hoverLatched`), the poll may still open the card mid-alert, it just may not
-        // close it.
-        guard !alertArmed, expandedState, collapseWork == nil else { return }
+        // **An alert's or a question's card is not the hover poll's to fold.** That poll runs every
+        // 0.15s and the pointer is usually *outside* the island when such a card opens — that is what
+        // an unprompted expansion is — so without this guard the card would be folded one
+        // `hoverCloseDelay` after it opened and nobody would ever read it. While either is up, its own
+        // deadline owns the fold and hands the card back here when it ends (`endAlert`/`endQuestion`).
+        // Expansion is deliberately not guarded: unless a dismissal has latched the hover open off
+        // (`hoverLatched`), the poll may still open the card mid-alert, it just may not close it.
+        guard !alertArmed, !questionArmed, expandedState, collapseWork == nil else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.setExpanded(false, animated: true)
@@ -2074,6 +2146,40 @@ final class IslandPanel {
         guard let panel, let entry = card?.questionView?.textEntry else { return }
         panel.makeKey()
         panel.makeFirstResponder(entry)
+    }
+
+    /// The last pending form settled: the card is no longer the question's. Hand it back to the hover
+    /// machine exactly as an alert's own timer does (`endAlert`), so an unattended card folds on the
+    /// ordinary deadline while a card somebody is pointing at stays readable.
+    private func endQuestion() {
+        questionWork?.cancel()
+        questionWork = nil
+        questionFoldFormID = nil
+        evaluateHover()
+    }
+
+    /// Arm (or re-arm) the question's own fold deadline for the head form.
+    ///
+    /// Once per form and never extended: the pointer does not touch it. This card was not opened by the
+    /// pointer, so it does not close because of it — `ocbar.questionFold` says how long it gets and
+    /// nothing else moves that deadline. A queued form has its own id, so it takes a fresh one.
+    private func armQuestionTimer() {
+        guard let question, let seconds = islandQuestionFold() else {
+            questionWork?.cancel()
+            questionWork = nil
+            questionFoldFormID = nil
+            return
+        }
+        guard questionFoldFormID != question.id else { return }
+        questionFoldFormID = question.id
+        questionWork?.cancel()
+        let formID = question.id
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.question?.id == formID else { return }
+            self.onQuestionFoldReached?(formID)
+        }
+        questionWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     // MARK: - Alert
@@ -5460,6 +5566,10 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         optionsKey = key
         for view in optionViews { view.removeFromSuperview() }
         optionViews = []
+        // A new field is read from its first option: an offset carried over from the previous field
+        // would open it halfway down.
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
         guard let field = content.field, content.answerable else { return }
         for option in field.options {
             let view = IslandQuestionOptionView(frame: .zero)
@@ -5538,10 +5648,6 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
             view.frame = NSRect(x: 0, y: optionY, width: fullWidth, height: h)
             optionY += h
         }
-        // The list is read from its first option every time the field changes; a scroll offset
-        // carried over from the previous field would open the new one halfway down.
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: 0))
-        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     private static func optionHeight(_ option: QuestionOption) -> CGFloat {
@@ -5925,6 +6031,9 @@ final class IslandHost {
                 self?.onReplyQuestion?(question, answers)
             }
             panel.onQuestionHidden = { [weak self] formID in
+                self?.hideQuestion(formID)
+            }
+            panel.onQuestionFoldReached = { [weak self] formID in
                 self?.hideQuestion(formID)
             }
             return panel
