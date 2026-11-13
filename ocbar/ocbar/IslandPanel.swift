@@ -224,6 +224,10 @@ let islandActionButtonLabel = "Hide"
 /// The tooltip, and the second half of it is what this card actually does: hiding leaves the card with
 /// one way back, which is hovering the island again.
 let islandActionButtonTooltip = "Hide this card. The session keeps waiting — hover the island to bring it back."
+/// The question card's `Hide`, which is **not** the alert's. It latches that form off until it settles
+/// or a new form becomes the head, so the alert's "hover the island to bring it back" would be false
+/// on this card — the terminal is the way back.
+let islandQuestionHideButtonTooltip = "Hide this question. It stays pending — answer it in the terminal."
 /// The question card's other footer control, immediately **left of `Hide`**: one reply carries the
 /// form's whole answer set, so this is the card's only submit. It borrows `Hide`'s every number — the
 /// size, the tone ladder, the ground, the hover — because a second quiet control with a ladder of its
@@ -542,6 +546,13 @@ struct IslandListBudget {
 /// different question, and a settled one has nothing left to answer.
 struct IslandQuestionState: Equatable {
     var answers: [String: [String: QuestionAnswer]] = [:]
+    /// The typed text of a list field's open `Other…` row, by form and field key. A list answer is a
+    /// set of picked values, so the string being typed is not part of it until it is confirmed; it
+    /// lives here because the card is on every screen and both have to draw the same field.
+    var drafts: [String: [String: String]] = [:]
+    /// The forms a reply is in flight for. `Send` is held back on **every** screen while a form is in
+    /// here: one form is one write, so a second click on another display must not become a second reply.
+    var submitting: Set<String> = []
     /// The form the user hid. It asks nothing — no card of its own, no unprompted open —
     /// until it settles and a different form becomes the head, which is what "Hide folds
     /// without answering" has to mean when the form is still pending on the server.
@@ -701,9 +712,15 @@ final class IslandPanel {
     /// hiding on one screen has to hide it on all of them, exactly as the alert's `Hide` does.
     var onQuestionHidden: (@MainActor (String) -> Void)?
 
-    /// A question's fold deadline arrived for that form. The host dismisses it the way `Hide` does —
-    /// one deadline serves every screen, so whichever panel keeps time first puts the card away on all
-    /// of them.
+    /// The in-progress typed text of a list field's `Other…` row. Shared like the answers: the other
+    /// screen draws the same field in the same state.
+    var onQuestionDraft: (@MainActor (String, String, String) -> Void)?
+
+    /// Enter in a list field's `Other…` row: the typed string is added to the picked values.
+    var onQuestionCommit: (@MainActor (String, String, String) -> Void)?
+
+    /// A question's fold deadline arrived for that form. **Not a dismissal:** the form stays pending
+    /// and answerable, so the whole host only folds this showing, without latching the form off.
     var onQuestionFoldReached: (@MainActor (String) -> Void)?
 
     /// Fired when the card's footer gear is clicked: the way into the dropdown menu while the menubar item
@@ -820,6 +837,32 @@ final class IslandPanel {
         // and `clearAlert`'s "an open card shrank" resize cannot race the fold's own frame change.
         setExpanded(false, animated: false)
         clearAlert()
+    }
+
+    /// The question's fold deadline arrived on this panel: fold **this showing** and leave the form
+    /// pending, so the card asks again the next time it is shown. Nothing is latched against the form
+    /// here — that is `Hide`'s job. Called on every panel by the host, one deadline serving all of them.
+    ///
+    /// The fold holds until the pointer leaves (`hoverLatched`): the deadline is not the pointer's,
+    /// and a poll that re-opened the card a moment later would make it the pointer's after all.
+    func foldQuestion(_ formID: String) {
+        guard question?.id == formID else { return }
+        questionWork?.cancel()
+        questionWork = nil
+        questionFoldFormID = nil
+        guard expandedState else { return }
+        hoverLatched = true
+        setExpanded(false, animated: true)
+    }
+
+    /// The fold preference changed: give the showing the new deadline instead of the old one. A
+    /// deadline is armed per showing, and `armQuestionTimer` only arms what is on screen, so clearing
+    /// it here is enough — the next tick (or the next open) arms from the new value.
+    func rearmQuestionDeadline() {
+        questionWork?.cancel()
+        questionWork = nil
+        questionFoldFormID = nil
+        armQuestionTimer()
     }
 
     /// Open the card by itself, on a session transition, and fold it back after
@@ -956,12 +999,13 @@ final class IslandPanel {
     /// one thing that has to agree everywhere).
     private var questionFieldIndex = 0
     /// What the user has picked, as the host last pushed it. Every panel draws the same
-    /// set, and every card's `Send` gate is computed from it.
+    /// set, every card's `Send` gate is computed from it, and the block's text field takes its
+    /// contents from the same two places (`answers` and `drafts`).
     private var questionState = IslandQuestionState()
-    /// The form a reply is in flight for. `Send` is held while it is set, so one click cannot
-    /// become two replies; it is released when the head form changes, which is what a settled
-    /// or dropped form does.
-    private var submittingFormID: String?
+    /// Whether this panel holds the keyboard for a free-text answer. The card takes it in one place
+    /// (`focusQuestionText`) and gives it back in one (`releaseQuestionKeyboard`); this is what stops
+    /// a tick that merely redraws the block from re-taking it.
+    private var questionKeyHeld = false
     /// The form this panel has already opened itself for. The unprompted open happens **once per
     /// form**, not once per tick: a card the user dismissed — `Hide`, a row click, the menubar
     /// opening — must stay folded while that form is still pending. A queued form has a new id, so it
@@ -969,7 +1013,8 @@ final class IslandPanel {
     private var autoOpenedQuestionID: String?
     /// The question's own fold deadline, and which form it was armed for. Deliberately outside
     /// `expandWork`/`collapseWork` (the hover machine's, which `cancelPending` clears on every
-    /// expansion): a question card's fate is its form's, not the pointer's.
+    /// expansion): a question card's fate is its form's, not the pointer's. Armed per **showing** —
+    /// clearing it is what gives the next one a fresh deadline.
     private var questionWork: DispatchWorkItem?
     private var questionFoldFormID: String?
 
@@ -1435,10 +1480,9 @@ final class IslandPanel {
         // make `Hide` step to the next question instead of putting the card away.
         if let hidden = questionState.hidden, head?.id == hidden { head = nil }
         if head?.id != question?.id {
-            // The form changed: the card opens on this form's first field, and a reply that was in
-            // flight for the previous one is done with (the server settles a form as a whole).
+            // The form changed: the card opens on this form's first field. A reply in flight for the
+            // previous one is the host's to release — the server settles a form as a whole.
             questionFieldIndex = 0
-            submittingFormID = nil
         }
         question = head
         questionQueueCount = total
@@ -1512,6 +1556,7 @@ final class IslandPanel {
                     // the alert's is the shared fold alone. Both are host-owned for the row click's
                     // reason: the card is on every screen, and hiding it on one hides it on all.
                     if let question = self.question {
+                        self.releaseQuestionKeyboard()
                         self.onQuestionHidden?(question.id)
                     } else {
                         self.onHideRequested?()
@@ -1524,6 +1569,12 @@ final class IslandPanel {
                 card.actionButton = button
                 changed = true
             }
+            // The card can turn from an alert's into a question's and back on one panel (or between
+            // ticks), so the promise the tooltip makes is re-set with it: a question's `Hide` latches
+            // the form off, and hovering would not bring it back.
+            card.actionButton?.toolTip = questionArmed
+                ? islandQuestionHideButtonTooltip
+                : islandActionButtonTooltip
         } else if let button = card.actionButton {
             button.removeFromSuperview()
             card.actionButton = nil
@@ -1690,6 +1741,8 @@ final class IslandPanel {
         let fields = question.fields
         let index = fields.indices.contains(questionFieldIndex) ? questionFieldIndex : 0
         let field = fields.isEmpty ? nil : fields[index]
+        let answers = questionState.answers[question.id] ?? [:]
+        let textMode = field.map { isTyping($0) } ?? false
         return IslandQuestionView.Content(
             formID: question.id,
             heading: field?.heading ?? "",
@@ -1700,8 +1753,27 @@ final class IslandPanel {
             field: field,
             answerable: question.answerable,
             steppable: fields.count > 1,
-            answers: questionState.answers[question.id] ?? [:]
+            answers: answers,
+            textEntry: textMode,
+            text: field.map { textMode ? typedText($0) : "" } ?? ""
         )
+    }
+
+    /// Whether the card is drawing a field's text field: a text field's own rule (`Other…` picked, or
+    /// its only row), or a list field whose `Other…` row is open — there the typed string is a draft
+    /// until Enter adds it, so it cannot be read off the answer.
+    private func isTyping(_ field: QuestionField) -> Bool {
+        guard let question else { return false }
+        if field.kind == .list { return questionState.drafts[question.id]?[field.key] != nil }
+        return field.showsTextEntry(answer: questionState.answers[question.id]?[field.key])
+    }
+
+    /// What the text field shows: the typed answer itself, or a list field's unconfirmed draft.
+    private func typedText(_ field: QuestionField) -> String {
+        guard let question else { return "" }
+        if field.kind == .list { return questionState.drafts[question.id]?[field.key] ?? "" }
+        guard case .text(let value)? = questionState.answers[question.id]?[field.key] else { return "" }
+        return value
     }
 
     /// Height the question block costs the card right now. Zero when nothing is
@@ -1723,6 +1795,7 @@ final class IslandPanel {
             guard let view = card.questionView else { return false }
             view.removeFromSuperview()
             card.questionView = nil
+            syncQuestionKeyboard()
             return true
         }
         let view: IslandQuestionView
@@ -1733,10 +1806,15 @@ final class IslandPanel {
             // The alpha is set on creation, not left to `rebuildRows`: this can be created on a fold the
             // row path does not run, and a folded card keeps its content views at alpha 0.
             view.alphaValue = expandedState ? 1 : 0
+            view.onCommitText = { [weak self] text in self?.commitQuestionText(text) }
             card.addSubview(view)
             card.questionView = view
         }
-        return view.configure(content)
+        let changed = view.configure(content)
+        // The block is what shows and hides the text field, so every rebuild is also a chance to give
+        // the keyboard back — a field step, a commit, a settle or a payload change.
+        syncQuestionKeyboard()
+        return changed
     }
 
     /// The collapsed pill's readouts, as one dictionary: how many sessions are in
@@ -1836,6 +1914,9 @@ final class IslandPanel {
         cancelPending()
         stopHoverTimer()
         expandedState = false
+        // An off-screen card holds no keyboard: a disabled island or a retired display hands the
+        // terminal its typing back exactly as a fold does.
+        releaseQuestionKeyboard()
         guard visible else { return }
         visible = false
         // Off screen means nothing may keep animating: the status light's ticker
@@ -1858,6 +1939,9 @@ final class IslandPanel {
         // has not answered, not the hover machine re-opening what they closed.
         if value { hoverLatched = false }
         expandedState = value
+        // A fold ends the card's one keyboard moment wherever it came from (the deadline, `Hide`,
+        // the menubar, a row click); the terminal gets its typing back here rather than on the next tick.
+        syncQuestionKeyboard()
         // Before the guard: the card's rows follow `expandedState` whether or not this panel is up,
         // and a row's mark must stop the moment the card starts closing rather than at the next tick.
         updateRowOnScreen()
@@ -2055,12 +2139,19 @@ final class IslandPanel {
             : question.fields.first
     }
 
-    /// One click on an option row. `Other…` is not a value: it starts the field's text mode with an
-    /// empty answer, and the block draws a text field for it on the very next configuration.
+    /// One click on an option row. `Other…` is not a value: for a text field it starts the field's text
+    /// mode with an empty answer, for a list field it opens a draft the typed string is added from.
+    /// Either way the block draws its text field on the very next configuration.
     private func selectOption(_ option: QuestionOption) {
         guard let question, let field = currentField else { return }
         if option.isOther {
-            onQuestionAnswer?(question.id, field.key, .text(""))
+            if field.kind == .list {
+                // A list's picked values stay untouched while the draft is open: `Other…` adds to
+                // them on confirm, it does not replace them.
+                onQuestionDraft?(question.id, field.key, "")
+            } else {
+                onQuestionAnswer?(question.id, field.key, .text(""))
+            }
             // The text field exists only after that push has been drawn — and only on the screen that
             // was clicked, which is why the keyboard is taken here and not by the block.
             DispatchQueue.main.async { [weak self] in self?.focusQuestionText() }
@@ -2088,11 +2179,23 @@ final class IslandPanel {
         return values
     }
 
-    /// A keystroke in the free-text field. Every keystroke is the answer, so a render tick that
-    /// arrives mid-word cannot lose what has been typed.
+    /// A keystroke in the free-text field. A text field's answer **is** the text, so every keystroke
+    /// is the answer and a render tick that arrives mid-word cannot lose it. A list field's typed
+    /// string is a draft instead: Enter adds it to the picked values, so it is held apart.
     private func textEntered(_ text: String) {
         guard let question, let field = currentField else { return }
-        onQuestionAnswer?(question.id, field.key, .text(text))
+        if field.kind == .list {
+            onQuestionDraft?(question.id, field.key, text)
+        } else {
+            onQuestionAnswer?(question.id, field.key, .text(text))
+        }
+    }
+
+    /// Enter on a list field's `Other…` row: the typed string is **added** to the picked values, and
+    /// the field goes back to its rows. An empty draft only closes the row.
+    private func commitQuestionText(_ text: String) {
+        guard let question, let field = currentField, field.kind == .list else { return }
+        onQuestionCommit?(question.id, field.key, text)
     }
 
     /// A chevron: step to the next or previous field of the same form. Only the field index moves —
@@ -2119,9 +2222,10 @@ final class IslandPanel {
     }
 
     /// Whether `Send` may be pressed: every required field carries a non-empty answer, the form can be
-    /// answered here at all, and no reply is already in flight for it.
+    /// answered here at all, and no reply is already in flight for it — on **any** screen, since the
+    /// guard lives in the host's shared state (`IslandQuestionState.submitting`).
     private var canSendCurrentQuestion: Bool {
-        guard let question, question.answerable, submittingFormID != question.id else { return false }
+        guard let question, question.answerable, !questionState.submitting.contains(question.id) else { return false }
         let picked = questionState.answers[question.id] ?? [:]
         return question.fields.allSatisfy { field in
             guard field.required else { return true }
@@ -2131,11 +2235,11 @@ final class IslandPanel {
 
     /// `Send`: one reply carrying every field's answer. The form does not leave this card here — the
     /// monitor's reply completion is what drops it from the rows, so the card can only ever fold once
-    /// the server has answered or refused.
+    /// the server has answered or refused. The in-flight guard is the host's, so every screen's
+    /// `Send` is held back by the one click.
     private func submitQuestion() {
         guard let question, canSendCurrentQuestion else { return }
-        submittingFormID = question.id
-        card?.sendButton?.isEnabled = false
+        releaseQuestionKeyboard()
         onSubmitQuestion?(question, answersForSubmission(question))
     }
 
@@ -2145,7 +2249,28 @@ final class IslandPanel {
     private func focusQuestionText() {
         guard let panel, let entry = card?.questionView?.textEntry else { return }
         panel.makeKey()
-        panel.makeFirstResponder(entry)
+        if panel.makeFirstResponder(entry) { questionKeyHeld = true }
+    }
+
+    /// Give the keyboard back, because the card's one keyboard moment is over. Resigning key is what
+    /// returns typing to the terminal this non-activating panel took it from; the panel itself stays
+    /// on screen, only its key status and first responder go.
+    private func releaseQuestionKeyboard() {
+        guard questionKeyHeld else { return }
+        questionKeyHeld = false
+        panel?.makeFirstResponder(nil)
+        panel?.resignKey()
+    }
+
+    /// Reconcile the keyboard with what the card is actually showing. The block hides its text field
+    /// whenever text mode ends — a commit, a field step, `Hide`, a settle, a payload change — and the
+    /// card folds for its deadline; in every one of those the terminal must get its typing back.
+    private func syncQuestionKeyboard() {
+        guard questionKeyHeld else { return }
+        guard expandedState, card?.questionView?.isTextEntryVisible == true else {
+            releaseQuestionKeyboard()
+            return
+        }
     }
 
     /// The last pending form settled: the card is no longer the question's. Hand it back to the hover
@@ -2158,13 +2283,14 @@ final class IslandPanel {
         evaluateHover()
     }
 
-    /// Arm (or re-arm) the question's own fold deadline for the head form.
+    /// Arm (or re-arm) the question's own fold deadline for this showing.
     ///
-    /// Once per form and never extended: the pointer does not touch it. This card was not opened by the
-    /// pointer, so it does not close because of it — `ocbar.questionFold` says how long it gets and
-    /// nothing else moves that deadline. A queued form has its own id, so it takes a fresh one.
+    /// Once per showing and never extended: the pointer does not touch it. This card was not opened by
+    /// the pointer, so it does not close because of it — `ocbar.questionFold` says how long it gets and
+    /// nothing else moves that deadline. A queued form has its own id, so it takes a fresh one, and so
+    /// does a card the deadline folded when the pointer brings it back (`foldQuestion`).
     private func armQuestionTimer() {
-        guard let question, let seconds = islandQuestionFold() else {
+        guard let question, expandedState, let seconds = islandQuestionFold() else {
             questionWork?.cancel()
             questionWork = nil
             questionFoldFormID = nil
@@ -5381,6 +5507,11 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         /// The form's answers so far, by field key. Selection is drawn from these, so the block
         /// owns no state of its own and two screens cannot show two answers.
         let answers: [String: QuestionAnswer]
+        /// Whether the block draws the field's text field instead of its answer rows.
+        let textEntry: Bool
+        /// What that text field holds: the typed answer of a text field, or a list field's
+        /// unconfirmed draft.
+        let text: String
     }
 
     /// The form's height for the state it is in. The panel reads this for the card's own height
@@ -5391,7 +5522,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
                 + islandQuestionGap + islandQuestionEmptyLineHeight
         }
         let body: CGFloat
-        if field.showsTextEntry(answer: content.answers[field.key]) {
+        if content.textEntry {
             body = islandQuestionTextHeight
         } else {
             body = min(optionsHeight(field.options), islandQuestionOptionsMaxHeight)
@@ -5401,7 +5532,7 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     }
 
     private static func optionsHeight(_ options: [QuestionOption]) -> CGFloat {
-        options.reduce(0) { $0 + ($1.detail == nil ? islandQuestionOptionHeight : islandQuestionOptionDetailHeight) }
+        options.reduce(0) { $0 + optionHeight($1) }
     }
 
     /// The block's current height, for the card's layout and `contentHeight`. Both read this one
@@ -5413,11 +5544,16 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     var onOption: (@MainActor (QuestionOption) -> Void)?
     var onText: (@MainActor (String) -> Void)?
     var onStep: (@MainActor (Int) -> Void)?
+    /// Enter in a list field's `Other…` row: the typed string is added to the picked values.
+    var onCommitText: (@MainActor (String) -> Void)?
 
     /// The free-text answer field, for the panel to make first responder: the card's one keyboard
     /// moment. It is a subview from the start and merely hidden, so taking the keyboard never waits on
     /// a view being built.
     var textEntry: NSView { textField }
+
+    /// Whether the text field is on screen right now — what the panel holds its keyboard ownership to.
+    var isTextEntryVisible: Bool { !textField.isHidden }
 
     private var content: Content?
     /// The option set currently built into `optionViews`. A change here is the only thing that
@@ -5533,24 +5669,18 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
         nextButton.isEnabled = new.steppable && new.fieldIndex + 1 < new.fieldCount
 
         // `Other…` swaps the answer rows for the text field. The rows stay built and hidden: removing
-        // them here would delete the very view whose click is on the stack.
-        let answer = field.flatMap { new.answers[$0.key] }
-        let textMode = field?.showsTextEntry(answer: answer) ?? false
+        // them here would delete the very view whose click is on the stack. What to draw is the
+        // panel's call (`Content.textEntry`) — a list field's unconfirmed draft is not in its answer.
+        let textMode = new.textEntry
         scroll.isHidden = !(showsNav && !textMode && !(field?.options.isEmpty ?? true))
         textField.isHidden = !textMode
-        if textMode, textField.stringValue != typedText(answer) {
-            textField.stringValue = typedText(answer)
+        if textMode, textField.stringValue != new.text {
+            textField.stringValue = new.text
         }
         rebuildOptionsIfNeeded(new)
         applySelections(new)
         needsLayout = true
         return heightChanged
-    }
-
-    /// The typed part of an answer — what the text field shows. Only a `.text` answer can be one.
-    private func typedText(_ answer: QuestionAnswer?) -> String {
-        guard case .text(let value)? = answer else { return "" }
-        return value
     }
 
     private func optionsKey(for content: Content) -> String {
@@ -5591,6 +5721,14 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
     /// A keystroke is the answer: the panel stores it, which is what survives the render ticks.
     func controlTextDidChange(_ obj: Notification) {
         onText?(textField.stringValue)
+    }
+
+    /// Enter confirms a list field's `Other…` row; nothing else in the block reads the keyboard, and
+    /// every other command falls through to the field's own behaviour.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        onCommitText?(textField.stringValue)
+        return true
     }
 
     override func layout() {
@@ -5788,7 +5926,7 @@ private final class IslandQuestionStepButton: NSView {
         glyph.image = islandSymbolImage(symbol: symbol, color: NSColor.white.withAlphaComponent(0.55), pointSize: 10)
         glyph.imageScaling = .scaleNone
         addSubview(glyph)
-        alphaValue = 0.25
+        alphaValue = islandCardDisabledAlpha
     }
 
     required init?(coder: NSCoder) {
@@ -5796,7 +5934,7 @@ private final class IslandQuestionStepButton: NSView {
     }
 
     var isEnabled = false {
-        didSet { alphaValue = isEnabled ? 1 : 0.25 }
+        didSet { alphaValue = isEnabled ? 1 : islandCardDisabledAlpha }
     }
 
     override func layout() {
@@ -5890,6 +6028,10 @@ final class IslandHost {
     /// different fields — a different question, so its old answers must not survive. A settled form
     /// simply disappears from the list, which drops its entry the same way. `hidden` is released when
     /// the hidden form settles, so the next queued form asks for the card.
+    ///
+    /// A form appearing for the first time (or re-asked) is seeded with the answers the server already
+    /// gave it (`PendingQuestion.defaultAnswers`) — a required field with a `default` would otherwise
+    /// hold `Send` back forever, waiting for the user to re-pick what the server already picked.
     private func pruneQuestionState(rows: [IslandRow]) {
         var live: [String: String] = [:]
         for row in rows {
@@ -5897,11 +6039,25 @@ final class IslandHost {
         }
         let previous = questionPayloads
         questionPayloads = live
-        for formID in Array(questionState.answers.keys) where previous[formID] != live[formID] {
+        for formID in Set(questionState.answers.keys).union(questionState.drafts.keys) {
+            guard previous[formID] != live[formID] else { continue }
             questionState.answers[formID] = nil
+            questionState.drafts[formID] = nil
+        }
+        // A reply that resolved, or a form that left the rows or changed under one, releases its guard.
+        questionState.submitting = questionState.submitting.filter {
+            previous[$0] == live[$0] && live[$0] != nil
         }
         if let hidden = questionState.hidden, live[hidden] == nil {
             questionState.hidden = nil
+        }
+        // After the prune, so the seed is not what the payload check then throws away.
+        for row in rows {
+            for question in row.questions where questionState.answers[question.id] == nil {
+                let seeded = question.defaultAnswers
+                guard !seeded.isEmpty else { continue }
+                questionState.answers[question.id] = seeded
+            }
         }
     }
 
@@ -5912,6 +6068,37 @@ final class IslandHost {
         pushQuestionState()
     }
 
+    /// The typed text of a list field's open `Other…` row. Shared like an answer: the field has to read
+    /// the same on both screens, and confirming is what turns it into a picked value.
+    private func draft(formID: String, fieldKey: String, text: String) {
+        questionState.drafts[formID, default: [:]][fieldKey] = text
+        pushQuestionState()
+    }
+
+    /// Enter on a list field's `Other…` row: the typed string is **added** to the picked values, never
+    /// put in their place, and the field returns to its rows. One push, so no screen sees the value
+    /// arrive and the text field linger.
+    private func commitDraft(formID: String, fieldKey: String, text: String) {
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var values: [String] = []
+        if case .list(let picked)? = questionState.answers[formID]?[fieldKey] { values = picked }
+        if !typed.isEmpty, !values.contains(typed) { values.append(typed) }
+        questionState.answers[formID, default: [:]][fieldKey] = .list(values)
+        questionState.drafts[formID]?[fieldKey] = nil
+        if questionState.drafts[formID]?.isEmpty == true { questionState.drafts[formID] = nil }
+        pushQuestionState()
+    }
+
+    /// `Send` on any screen: **one wall per form, for the whole app.** The guard lives here beside the
+    /// answers rather than on the panel that was clicked, because the card is on every display — two
+    /// panels each holding their own flag could both post the same reply.
+    private func submitQuestion(_ question: PendingQuestion, answers: [String: QuestionAnswer]) {
+        guard !questionState.submitting.contains(question.id) else { return }
+        questionState.submitting.insert(question.id)
+        pushQuestionState()
+        onReplyQuestion?(question, answers)
+    }
+
     /// The question card's `Hide`: **fold without answering.** The form stays pending on the server, so
     /// the dismissal is recorded against its id — the card does not ask about it again, on any screen,
     /// until it settles or another form becomes the head.
@@ -5919,6 +6106,19 @@ final class IslandHost {
         questionState.hidden = formID
         collapse()
         pushQuestionState()
+    }
+
+    /// A question's fold deadline arrived on one screen: **fold that showing on every screen, and
+    /// nothing else.** The form is not dismissed — it stays pending and answerable, and asking again is
+    /// what the next showing does — which is the whole difference between this and `hideQuestion`.
+    private func foldQuestion(_ formID: String) {
+        for panel in panels { panel.foldQuestion(formID) }
+    }
+
+    /// `ocbar.questionFold` changed: every showing re-arms from the new value, so a menu pick applies
+    /// to the card that is up rather than to the next form.
+    func rearmQuestionDeadline() {
+        for panel in panels { panel.rearmQuestionDeadline() }
     }
 
     private func pushQuestionState() {
@@ -6028,13 +6228,19 @@ final class IslandHost {
                 self?.answer(formID: formID, fieldKey: fieldKey, answer: answer)
             }
             panel.onSubmitQuestion = { [weak self] question, answers in
-                self?.onReplyQuestion?(question, answers)
+                self?.submitQuestion(question, answers: answers)
+            }
+            panel.onQuestionDraft = { [weak self] formID, fieldKey, text in
+                self?.draft(formID: formID, fieldKey: fieldKey, text: text)
+            }
+            panel.onQuestionCommit = { [weak self] formID, fieldKey, text in
+                self?.commitDraft(formID: formID, fieldKey: fieldKey, text: text)
             }
             panel.onQuestionHidden = { [weak self] formID in
                 self?.hideQuestion(formID)
             }
             panel.onQuestionFoldReached = { [weak self] formID in
-                self?.hideQuestion(formID)
+                self?.foldQuestion(formID)
             }
             return panel
         }

@@ -1091,8 +1091,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
         render(currentState, forceMenuRefresh: true)
     }
 
-    @objc private func questionFoldSelected(_ sender: NSMenuItem) {
+    @objc @MainActor private func questionFoldSelected(_ sender: NSMenuItem) {
         setIslandQuestionFold(seconds: sender.tag == 0 ? nil : sender.tag)
+        // Read at use time, so the card that is up takes the new deadline rather than the next form.
+        island.rearmQuestionDeadline()
         render(currentState, forceMenuRefresh: true)
     }
 
