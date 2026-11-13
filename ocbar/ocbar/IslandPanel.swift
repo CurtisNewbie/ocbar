@@ -5934,7 +5934,11 @@ private final class IslandQuestionView: NSView, NSTextFieldDelegate {
             return true
         }
         guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        // The typed answer is already recorded keystroke by keystroke (and a list's draft is committed
+        // here), so Enter is the form's own "next": it moves to the following field rather than leaving
+        // the user to find the chevron with the keyboard still held.
         onCommitText?(textField.stringValue)
+        onStep?(1)
         return true
     }
 
@@ -6048,10 +6052,13 @@ private final class IslandQuestionOptionView: NSView {
     static let markColumnWidth: CGFloat = (markImage?.size.width ?? 0) + islandRowGlyphGap
     /// The row's text box begins `islandQuestionOptionTextInset` in from each side and ends before the
     /// checkmark's column. Both the row's own layout and the block's height arithmetic read this one sum.
-    static let textColumnInset: CGFloat = markColumnWidth + islandQuestionOptionTextInset * 2
+    static let textColumnInset: CGFloat = markColumnWidth + markTrailingInset + islandQuestionOptionTextInset
     /// Where a row's text starts, shared with the block's free-text row so the typed line sits on the
     /// same left edge as the labels above it.
     static let textLeftInset: CGFloat = islandQuestionOptionTextInset
+    /// Air between the tick and the row's trailing edge. Wider than the text's leading inset so the
+    /// mark reads as sitting inside the row rather than against its edge.
+    static let markTrailingInset: CGFloat = 14
 
     private let label = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
@@ -6122,7 +6129,7 @@ private final class IslandQuestionOptionView: NSView {
         let markSize = mark.image?.size ?? .zero
         // The tick keeps the same air from the row's trailing edge as the text keeps from its leading
         // one, so a selected row does not look like it is spilling out of the card.
-        mark.frame = NSRect(x: bounds.width - markSize.width - Self.textLeftInset,
+        mark.frame = NSRect(x: bounds.width - markSize.width - Self.markTrailingInset,
                             y: (bounds.height - markSize.height) / 2,
                             width: markSize.width, height: markSize.height)
     }
