@@ -561,10 +561,9 @@ struct IslandQuestionState: Equatable {
     /// The forms a reply is in flight for. `Send` is held back on **every** screen while a form is in
     /// here: one form is one write, so a second click on another display must not become a second reply.
     var submitting: Set<String> = []
-    /// The form the user hid. It asks nothing — no card of its own, no unprompted open —
-    /// until it settles and a different form becomes the head, which is what "Hide folds
-    /// without answering" has to mean when the form is still pending on the server.
-    var hidden: String?
+    /// The forms the user hid, skipped rather than fatal to the queue — the rule and its counter live in
+    /// `islandQuestionHead`.
+    var hidden: Set<String> = []
 }
 
 /// Why the island opened itself. The two moments the bubble already announces —
@@ -1493,35 +1492,27 @@ final class IslandPanel {
         foldedCount = max(0, foldedAway + listed.count - visibleRows.count)
     }
 
-    /// The head of the pending question queue: the oldest form of the first ranked row
-    /// that carries one, and its position. Resolved here because it is the fold's other
-    /// input — a pending question scopes the card exactly as an armed alert does, and
-    /// **outranks it**: the form is the one thing that has to be answered.
+    /// The head of the pending question queue: the oldest form the user has not hidden, and how many
+    /// forms the card may still show. Resolved here because it is the fold's other input — a pending
+    /// question scopes the card exactly as an armed alert does, and **outranks it**: the form is the
+    /// one thing that has to be answered.
+    ///
+    /// **Hide drops one form from consideration, not the queue** — `islandQuestionHead` owns that rule and
+    /// the counter it feeds.
     ///
     /// Panel-local state (`questionFieldIndex`) is reset when the form changes, so a
     /// queued form never opens on the field the previous one was left on.
     private func resolveQuestion(in ranked: [IslandRow]) {
-        // **Arrival order, not row order.** Rows are attention-ranked, so the session that asked last
-        // can rank above one that asked first; the card must still stay on the question already waiting
-        // for an answer. The monitor stamps each form when it first sees it.
-        var head: PendingQuestion?
-        var total = 0
-        for row in ranked {
-            for form in row.questions {
-                total += 1
-                if head == nil || form.arrival < head!.arrival { head = form }
-            }
-        }
-        // A hidden form asks nothing at all — not a later one in the queue behind it, which would
-        // make `Hide` step to the next question instead of putting the card away.
-        if let hidden = questionState.hidden, head?.id == hidden { head = nil }
-        if head?.id != question?.id {
+        // **Arrival order, not row order.** See `islandQuestionHead`: the monitor stamps each form when
+        // it first sees it, so the card stays on the question already waiting for an answer.
+        let head = islandQuestionHead(in: ranked.map(\.questions), hidden: questionState.hidden)
+        if head.form?.id != question?.id {
             // The form changed: the card opens on this form's first field. A reply in flight for the
             // previous one is the host's to release — the server settles a form as a whole.
             questionFieldIndex = 0
         }
-        question = head
-        questionQueueCount = total
+        question = head.form
+        questionQueueCount = head.count
     }
 
     /// Where the asking row sits in the ranked list. Nil when nothing is pending, which
@@ -1783,9 +1774,8 @@ final class IslandPanel {
     /// (`questionBlockHeight` → `IslandListBudget`), so what is measured and what is
     /// drawn cannot drift — the same rule the row heights and the empty line follow.
     ///
-    /// The queue's position is always `1`: a settled form leaves the server's list, and
-    /// the card only ever draws the head, so `1 of 3` is literally where the shown form
-    /// sits in the queue.
+    /// The queue's position is always `1`: a settled form leaves the server's list, and a hidden one is
+    /// skipped, so `1 of N` is where the shown form sits among the forms the card may still show.
     private func questionContent() -> IslandQuestionView.Content? {
         guard let question else { return nil }
         let fields = question.fields
@@ -6303,8 +6293,9 @@ final class IslandHost {
     ///
     /// The answer set is keyed on the form's id, and the server can re-ask a form under the same id with
     /// different fields — a different question, so its old answers must not survive. A settled form
-    /// simply disappears from the list, which drops its entry the same way. `hidden` is released when
-    /// the hidden form settles, so the next queued form asks for the card.
+    /// simply disappears from the list, which drops its entry the same way. `hidden` keys on the payload
+    /// too: a hidden form is released when it leaves the rows or is re-asked with a different payload,
+    /// because that is a different question.
     ///
     /// A form appearing for the first time (or re-asked) is seeded with the answers the server already
     /// gave it (`PendingQuestion.defaultAnswers`) — a required field with a `default` would otherwise
@@ -6325,8 +6316,8 @@ final class IslandHost {
         questionState.submitting = questionState.submitting.filter {
             previous[$0] == live[$0] && live[$0] != nil
         }
-        if let hidden = questionState.hidden, live[hidden] == nil {
-            questionState.hidden = nil
+        questionState.hidden = questionState.hidden.filter {
+            previous[$0] == live[$0] && live[$0] != nil
         }
         // After the prune, so the seed is not what the payload check then throws away.
         for row in rows {
@@ -6378,9 +6369,9 @@ final class IslandHost {
 
     /// The question card's `Hide`: **fold without answering.** The form stays pending on the server, so
     /// the dismissal is recorded against its id — the card does not ask about it again, on any screen,
-    /// until it settles or another form becomes the head.
+    /// until it settles.
     private func hideQuestion(_ formID: String) {
-        questionState.hidden = formID
+        questionState.hidden.insert(formID)
         collapse()
         pushQuestionState()
     }

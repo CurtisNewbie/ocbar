@@ -9,9 +9,9 @@ ocbar is a macOS menubar app (Swift/AppKit, no SwiftUI) that monitors OpenCode v
 ```
 
 - **`build.sh` is the only build path** — Xcode is not used. It also quits and relaunches the running app, so a rebuild is immediately live.
-- **A new `.swift` file must be added in two places or it is silently not compiled**: the hardcoded list in `build.sh`, and `ocbar/ocbar.xcodeproj/project.pbxproj`. Top-level executable code is only allowed in `main.swift`, which stays last in that list.
+- **A new `.swift` file must be added in two places or it is silently not compiled**: the hardcoded list in `build.sh`, and `ocbar/ocbar.xcodeproj/project.pbxproj`. Files under `tests/` are exempt: only `./test.sh` compiles them and they must not enter the app target. Top-level executable code is only allowed in `main.swift`, which stays last in that list.
 - arm64-only, target `macos13.0`; requires the Xcode Command Line Tools.
-- **No tests, no CI, no linter.** The only verification is a successful `./build.sh`.
+- **`./test.sh` runs the pure-seam assertion runner** over `Models.swift`; **`./build.sh` builds the app** and is how the UI is verified (no CI, no linter).
 
 ## Where the detail lives
 

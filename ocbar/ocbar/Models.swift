@@ -338,6 +338,29 @@ func pendingQuestion(from json: [String: Any]) -> PendingQuestion? {
     )
 }
 
+/// The pure head selection: one inner array per ranked row, in ranked order, plus the forms the user hid.
+///
+/// The card shows the oldest form still waiting for an answer — by the monitor's arrival stamp, not by
+/// row rank, since a session that asked last can rank above one that asked first. `count` is how many
+/// pending forms the card may still show.
+///
+/// **Hide takes one form out of the card's queue, never the queue itself.** A hidden form is skipped
+/// rather than fatal: it asks nothing until it settles, while every other pending form keeps its place
+/// and takes the card on the following tick, in the same session or another. It is not counted either,
+/// so `1 of N` counts only the forms the card may still show.
+func islandQuestionHead(in queues: [[PendingQuestion]], hidden: Set<String>) -> (form: PendingQuestion?, count: Int) {
+    var head: PendingQuestion?
+    var count = 0
+    for queue in queues {
+        for form in queue {
+            guard !hidden.contains(form.id) else { continue }
+            count += 1
+            if head == nil || form.arrival < head!.arrival { head = form }
+        }
+    }
+    return (head, count)
+}
+
 private func questionField(from json: [String: Any]) -> QuestionField? {
     guard let key = json["key"] as? String else { return nil }
     let body = questionText(

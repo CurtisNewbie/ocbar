@@ -219,9 +219,9 @@ feature gates follow.
 
 - [ ] `Hide` folds the card and the next pending form takes it on the following tick, in arrival
   order, whether it belongs to the same session or another.
-- [ ] The hidden form never returns to the card while it is pending, on any screen.
-- [ ] The card's queue counter counts only the forms it may still show.
-- [ ] `./test.sh` fails against the old head selection and passes against the new one.
+- [x] The hidden form never returns to the card while it is pending, on any screen.
+- [x] The card's queue counter counts only the forms it may still show.
+- [x] `./test.sh` fails against the old head selection and passes against the new one.
 - [ ] `./build.sh` succeeds and the card behaves as above with two sessions carrying questions.
 
 ## States and failure
