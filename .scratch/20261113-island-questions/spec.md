@@ -49,7 +49,8 @@ oldest first, and the card folds once the last one settles.
 14. As someone answering a question in the terminal instead, I want the card to notice and fold, so
     that I never have to dismiss what is already done.
 15. As someone who wants to answer in the terminal, I want Hide in the card's footer, so that I can
-    put the question back without answering it.
+    put that one question back without answering it while every other pending question still gets
+    the card.
 16. As someone who does not want the card to stay up, I want questions to fold after a set time, or
     never fold at all, so that the surface obeys my preference.
 17. As someone whose terminal is doing something else, I want the island to take the keyboard only
@@ -96,18 +97,22 @@ oldest first, and the card folds once the last one settles.
 - **Ignoring field conditions is deliberate.** Hidden and conditional fields are rendered like any
   other, so the card's field set never shrinks under the user's pointer.
 - **The card ends the way an alert does.** When the last pending form settles the card folds; Hide
-  folds without answering. Fold timing is its own preference, defaulting to never folding.
+  folds without answering. Hide takes exactly one form out of the card's queue: that form asks nothing
+  more until it settles, and every other pending form keeps its place, so the next one takes the card
+  on the following tick. Fold timing is its own preference, defaulting to never folding.
 
 ## Testing Decisions
 
-- The repo has no test harness, no CI and no linter; a successful `./build.sh` is the only automated
-  check. No test framework is introduced by this feature.
-- The one seam worth naming is the transform from the server's form payload to the card's block model
-  — pure, and where the field filtering, ordering and required-gating live. It stays a plain function
-  so that a future harness can pin it without touching the view layer.
-- Verification is the build, then a manual pass against a live session carrying a real question: one
-  single-field form, one multi-field form, one form with a free-text-only field, one form the card
-  cannot render, two forms queued, and an alert armed when a question arrives.
+- The repo gains a harness: `./test.sh` compiles the pure model seams against a small assertion runner
+  and exits non-zero on a failed check. No framework, no fixture files, no CI; `./build.sh` stays the
+  one app build.
+- The head selection is the seam this change pins. It lives beside the payload-to-block transform,
+  both plain functions over `Models.swift` types, so the runner compiles that file alone.
+- Verification is `./test.sh`, a successful `./build.sh`, then a manual pass against live sessions
+  carrying real questions: one single-field form, one multi-field form, one form with a free-text-only
+  field, one form the card cannot render, two forms queued, two sessions in different directories, two
+  sessions in one directory, a Hide with another form still pending, and an alert armed when a
+  question arrives.
 
 ## Required Skills
 
@@ -188,7 +193,7 @@ Answer values, by field type: `string` → string, `number`/`integer` → number
 | Key | Type | Domain | Default | Owner | Effect |
 |---|---|---|---|---|---|
 | `ocbar.questions` | bool | on / off | on | island menu | Off: no question card, no unprompted open; the waiting state and notification stay |
-| `ocbar.questionFold` | string | `never`, `5`, `10`, `20`, `30`, `60` | `never` | island menu | `never`: the card stays until answered or hidden. A seconds value folds it that long after it takes the card; the deadline is armed per showing — a queued form and a card reopened after a fold each get a full one — and the pointer never pauses it |
+| `ocbar.questionFold` | string | `never`, `5`, `10`, `20`, `30`, `60` | `never` | island menu | `never`: the card stays until answered or hidden. A seconds value folds it that long after it takes the card; the deadline is armed per showing, so a queued form, a form taking the card after a Hide, and a card reopened after a fold each get a full one, and the pointer never pauses it |
 
 Both are read at use time, so a menu pick applies without a relaunch — the same rule the existing
 feature gates follow.
@@ -196,7 +201,9 @@ feature gates follow.
 ## Invariants
 
 - Only sessions the card lists may be answered from it.
-- One form occupies the card at a time; the oldest pending one wins.
+- One form occupies the card at a time; the oldest pending one the user has not hidden wins.
+- Hide takes one form out of the queue, never the queue itself: that form stays silent until it
+  settles, and every other pending form keeps its place.
 - A pending question outranks an armed alert: the question takes the card. The alert stays armed —
   its own timer and dismissal still end it, and its sound has already played — and its row mark shows
   only when the asking row is also the alerted row, because the question scopes the card to one row.
@@ -208,6 +215,15 @@ feature gates follow.
 - Every screen's panel shows the same question and any of them may answer it.
 - The macOS notification is independent of the card and is never cancelled by answering.
 
+## Acceptance Criteria
+
+- [ ] `Hide` folds the card and the next pending form takes it on the following tick, in arrival
+  order, whether it belongs to the same session or another.
+- [ ] The hidden form never returns to the card while it is pending, on any screen.
+- [ ] The card's queue counter counts only the forms it may still show.
+- [ ] `./test.sh` fails against the old head selection and passes against the new one.
+- [ ] `./build.sh` succeeds and the card behaves as above with two sessions carrying questions.
+
 ## States and failure
 
 The card's block has one state at a time:
@@ -215,7 +231,7 @@ The card's block has one state at a time:
 | State | Entered by | Leaves by |
 |---|---|---|
 | `idle` | no pending form for a listed session | a form appears → `asking` |
-| `asking(fieldIndex, answers)` | a pending form arrives, or the previous one settles and another is queued | Send → `submitting`; the form settles elsewhere → `idle` or the next form; Hide → `idle` until the timer/next event |
+| `asking(fieldIndex, answers)` | a pending form arrives, or the previous one settles or is hidden and another is pending | Send → `submitting`; the form settles elsewhere → `idle` or the next form; Hide → that form drops out, so the next pending form or `idle` |
 | `submitting` | Send pressed | `204` → next queued form, or `idle` and the card folds; `400`/`404`/`409`/transport → `suppressed` |
 | `suppressed(formID, payload)` | a failed submit | a different payload for that form, or the form settling → `idle` |
 
