@@ -97,11 +97,11 @@ alert's timer already ended it is the same no-op.
 
 - [ ] With two sessions in one directory, a dismissal published for A retracts only an alert armed for A;
   B's alert, mark and scope survive.
-- [ ] `reminderEvents` names the publishing session on both dismissal forms and both transitions, in
+- [x] `reminderEvents` names the publishing session on both dismissal forms and both transitions, in
   today's order.
-- [ ] `./test.sh` fails against the old identity (the project directory standing in for the session id)
+- [x] `./test.sh` fails against the old identity (the project directory standing in for the session id)
   and passes against the new one.
-- [ ] The bubble still shows and dismisses by folder display name.
+- [x] The bubble still shows and dismisses by folder display name.
 - [ ] `./build.sh` succeeds, and a manual pass with two terminals in one directory shows B's mark
   surviving A's answer.
 

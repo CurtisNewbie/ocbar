@@ -894,11 +894,11 @@ final class IslandPanel {
     /// bound to no running client, and the card then opens with no row marked,
     /// because there is no row the mark could be about.
     ///
-    /// `name` is that session's **folder display name** — the same string the bubble is dismissed by
-    /// (`AppDelegate.dismissBubble`), because it is what `SessionMonitor.onDismiss` carries. It exists so
-    /// this alert can be *retracted* when its reason is gone (`retractAlert(named:)`), which is the
-    /// bubble's own behaviour: the user answers the question and the reminder disappears, rather than
-    /// sitting there for its remaining seconds.
+    /// `sessionID` is the identity of the session the alert is about, and the only key its reason is
+    /// matched on: several sessions can share one project directory, so the folder name cannot stand
+    /// in for it. It exists so this alert can be *retracted* when its reason is gone
+    /// (`retractAlert(sessionID:)`), which is the bubble's own behaviour: the user answers the
+    /// question and the reminder disappears, rather than sitting there for its remaining seconds.
     ///
     /// The alert owns the card for `seconds` (see `armAlertTimer`), and when it
     /// ends it does not decide anything: it hands the card back to the hover
@@ -910,8 +910,8 @@ final class IslandPanel {
     /// `update` tick, because an alert can land on a card the pointer already had open —
     /// which would otherwise sit there showing the whole list, and marking one row, until
     /// the next poll.
-    func alert(name: String, kind: IslandAlertKind, pid: Int32?, seconds: TimeInterval) {
-        alert = ActiveAlert(name: name, kind: kind, pid: pid)
+    func alert(sessionID: String, kind: IslandAlertKind, pid: Int32?, seconds: TimeInterval) {
+        alert = ActiveAlert(sessionID: sessionID, kind: kind, pid: pid)
         alertGeneration += 1
         // The alert takes over **both** directions of the hover machine, a fold
         // already booked included. `scheduleCollapse` only refuses to *schedule* a
@@ -956,9 +956,10 @@ final class IslandPanel {
     /// Retract the alert because its **reason** is gone — the user answered the prompt, or the session
     /// went back to work — if it is the alert this panel is showing.
     ///
-    /// Matched by the folder display name, the bubble's own key (see `alert(name:kind:pid:seconds:)`).
-    /// Only one alert exists at a time (a new one replaces it), so the looseness of a name match cannot
-    /// bite.
+    /// Matched by the session id, the identity its reason is published with (see
+    /// `alert(sessionID:kind:pid:seconds:)`). A new alert replaces the old one, so only the alert armed
+    /// last exists — and a dismissal naming any other session is a no-op, exactly as a dismissal that
+    /// arrives after the timer ended it is.
     ///
     /// **Deliberately `endAlert()`, and deliberately not `collapse()`.** This is the third exit, and the
     /// one whose pointer is *not* inside the island: the user is in a terminal, answering a prompt. So it
@@ -967,8 +968,8 @@ final class IslandPanel {
     /// stays up. `collapse()` is for the two exits where the pointer *is* inside by construction (the
     /// `Hide` button, a row click) and which therefore must latch (`hoverLatched`); merging the two would
     /// either freeze a card the user is reading or leave the poll free to re-open a card they dismissed.
-    func retractAlert(named name: String) {
-        guard alert?.name == name else { return }
+    func retractAlert(sessionID: String) {
+        guard alert?.sessionID == sessionID else { return }
         endAlert()
     }
 
@@ -1067,13 +1068,13 @@ final class IslandPanel {
     /// said they are done with it.
     private var hoverLatched = false
 
-    /// What an alert is, once armed: which transition fired, the session it is about — its folder display
-    /// name, so it can be retracted when that session's reason for the reminder is gone — and the row it
-    /// marks. Set and cleared together with `alertWork`, always — `alert != nil` is therefore the same
-    /// statement as "a timer is pending that will end it", and `alertArmed` is the one place the rest of
-    /// the panel asks that question.
+    /// What an alert is, once armed: which transition fired, the session it is about — its id, so it can be
+    /// retracted when that session's reason for the reminder is gone and no other session's dismissal can
+    /// take it — and the row it marks. Set and cleared together with `alertWork`, always — `alert != nil`
+    /// is therefore the same statement as "a timer is pending that will end it", and `alertArmed` is the
+    /// one place the rest of the panel asks that question.
     private struct ActiveAlert {
-        let name: String
+        let sessionID: String
         let kind: IslandAlertKind
         let pid: Int32?
     }
@@ -6453,28 +6454,31 @@ final class IslandHost {
     /// was worse — replaying it onto a display that has just been plugged in would
     /// open a card on a screen the user is not looking at, about a transition they
     /// have plausibly already seen.
-    func alert(name: String, kind: IslandAlertKind, pid: Int32?, seconds: TimeInterval) {
-        for panel in panels { panel.alert(name: name, kind: kind, pid: pid, seconds: seconds) }
+    func alert(sessionID: String, kind: IslandAlertKind, pid: Int32?, seconds: TimeInterval) {
+        for panel in panels {
+            panel.alert(sessionID: sessionID, kind: kind, pid: pid, seconds: seconds)
+        }
     }
 
     /// The alert's **reason** is gone — the user answered the prompt, or the session went back to work —
     /// so the card retracts, on every panel that is showing *that* alert and no other. Wired to
-    /// `monitor.onDismiss`, beside the bubble's dismissal, so the two reminders now retract in step.
+    /// `monitor.onDismiss`, beside the bubble's dismissal, so the two reminders retract in step.
     ///
-    /// Matched by the session's folder **display name**, which is what `SessionMonitor.onDismiss` carries
-    /// and what `AppDelegate.dismissBubble` matches the bubble on. A new alert replaces the old one, so only
-    /// one alert exists at a time and the looseness of a name match cannot bite.
+    /// Matched by the **session id**, which is what a `SessionReminder` carries and what the alert was
+    /// armed with; the bubble beside it dismisses by the folder display name, because one bubble stands
+    /// for one folder while an alert stands for one session. A new alert replaces the old one, so only one
+    /// alert exists at a time, and a dismissal naming a session that armed no alert is a no-op.
     ///
     /// **This exit must not become `collapse()`, and `collapse()` must not become this.** Here the pointer
     /// can be anywhere — the user is in a terminal — so the retract hands the card back to the hover machine
-    /// exactly as the alert's own timer does (`IslandPanel.retractAlert(named:)` → `endAlert`): an
+    /// exactly as the alert's own timer does (`IslandPanel.retractAlert(sessionID:)` → `endAlert`): an
     /// unattended card folds on the ordinary 0.35s deadline, and a card somebody is pointing at stays up.
     /// `collapse()` is for the two exits where the pointer is inside the island by construction — the `Hide`
     /// button and a row click — and which therefore latch the hover open off. Merging the two loses one
     /// behaviour whichever way it is merged: with a latch here, a card the user is reading would freeze
     /// open; without one there, the poll would re-open a card they just dismissed.
-    func dismissAlert(named name: String) {
-        for panel in panels { panel.retractAlert(named: name) }
+    func dismissAlert(sessionID: String) {
+        for panel in panels { panel.retractAlert(sessionID: sessionID) }
     }
 
     /// Whether any island is currently expanded.

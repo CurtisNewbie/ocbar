@@ -143,11 +143,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
         island.onReplyQuestion = { [weak self] question, answers in
             self?.monitor.reply(to: question, answers: answers)
         }
-        monitor.onTransition = { [weak self] status, dir, pid, title in
-            self?.showBubble(status: status, projectDir: dir, pid: pid, title: title)
+        monitor.onTransition = { [weak self] status, reminder, pid, title in
+            self?.showBubble(status: status, reminder: reminder, pid: pid, title: title)
         }
-        monitor.onDismiss = { [weak self] dir in
-            self?.dismissReminders(projectDir: dir)
+        monitor.onDismiss = { [weak self] reminder in
+            self?.dismissReminders(reminder)
         }
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -1356,8 +1356,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
         monitor.focusSession(pid: pid)
     }
 
-    private func showBubble(status: SessionStatus, projectDir: String, pid: Int32?, title: String?) {
-        let name = displayName(for: projectDir)
+    private func showBubble(status: SessionStatus, reminder: SessionReminder, pid: Int32?, title: String?) {
+        let name = displayName(for: reminder.projectDir)
         let statusWord: String
         let color: NSColor
         let symbol: String
@@ -1400,9 +1400,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
             // island push.
             let kind: IslandAlertKind = status == .waiting ? .waiting : .ready
             let seconds = TimeInterval(bubbleSeconds)
-            // `name` is the folder's display name, which is also what `dismissReminders` matches on when
-            // the reminder's reason goes away — the same key the bubble uses.
-            Task { @MainActor [island] in island?.alert(name: name, kind: kind, pid: pid, seconds: seconds) }
+            // The island arms on the **session id**, not the folder: two sessions can share a directory,
+            // and a folder-name key would let one's answer retract the other's alert.
+            Task { @MainActor [island] in
+                island?.alert(sessionID: reminder.sessionID, kind: kind, pid: pid, seconds: seconds)
+            }
         }
         // "Alert sound" is its own setting and is not owned by either surface: it
         // rings whenever one of them is going to show something. `.off` is the
@@ -1414,17 +1416,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
 
     /// The reason for a reminder is gone: the user answered the prompt, or the session went back to work
     /// (`SessionMonitor.onDismiss`, which fires for exactly those two, plus a session that disappears).
-    /// Both surfaces are dismissed by the **same key** — the folder's display name — because that is what
-    /// the callback carries, and the two reminders are the same event reported twice.
-    private func dismissReminders(projectDir: String) {
-        let name = displayName(for: projectDir)
-        bubble.dismiss(ifShowing: name)
+    /// The two surfaces are keyed differently because they are two different scopes: the bubble is one
+    /// bubble per folder, so it dismisses by the folder's display name; the island's alert is about one
+    /// session, so it retracts by the session id the reminder names.
+    private func dismissReminders(_ reminder: SessionReminder) {
+        bubble.dismiss(ifShowing: displayName(for: reminder.projectDir))
         // The island retracts its own way: it hands the card back to its hover machine rather than folding
         // it (an unattended card closes on the ordinary hover deadline, a card the user is pointing at
-        // stays up), and it only touches a panel whose armed alert is this one. It is a `@MainActor` type
-        // and this runs on the monitor's callback, so the push hops explicitly — the same shape as the
-        // alert push in `showBubble`.
-        Task { @MainActor [island] in island?.dismissAlert(named: name) }
+        // stays up), and it only touches a panel whose armed alert is this session's. It is a `@MainActor`
+        // type and this runs on the monitor's callback, so the push hops explicitly — the same shape as
+        // the alert push in `showBubble`.
+        Task { @MainActor [island] in island?.dismissAlert(sessionID: reminder.sessionID) }
     }
 
     private func bounceIcon() {

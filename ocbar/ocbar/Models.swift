@@ -474,6 +474,55 @@ struct SessionInfo: Equatable {
     var questions: [PendingQuestion] = []
 }
 
+/// What a reminder is about: the session that moved and the project it lives in. One value rather than
+/// two loose strings, so a directory can never be passed where an id belongs.
+struct SessionReminder: Equatable {
+    let sessionID: String
+    let projectDir: String
+}
+
+/// One thing a tick publishes to the reminder surfaces.
+enum ReminderEvent: Equatable {
+    case dismiss(SessionReminder)
+    case transition(kind: SessionStatus, reminder: SessionReminder, pid: Int32?, title: String?)
+}
+
+/// The reminder decisions one tick makes: the sessions that vanished from the list first (unordered
+/// among themselves — they come out of a `Set`), then each visible session in the order the monitor
+/// passes them, a dismissal before its transition.
+///
+/// The one thing it cannot show is *why* — the notification a transition also sends and the state it
+/// stores are the caller's. Pure on purpose: the identity each event carries is the part a refactor
+/// breaks silently, and the harness pins it here.
+func reminderEvents(
+    previousStatus: [String: SessionStatus],
+    previousDir: [String: String],
+    sessions: [SessionInfo]
+) -> [ReminderEvent] {
+    var events: [ReminderEvent] = []
+    let visibleIDs = Set(sessions.map(\.id))
+    for id in Set(previousStatus.keys).subtracting(visibleIDs) {
+        guard let dir = previousDir[id] else { continue }
+        events.append(.dismiss(SessionReminder(sessionID: id, projectDir: dir)))
+    }
+    for session in sessions {
+        let prev = previousStatus[session.id] ?? .idle
+        let reminder = SessionReminder(sessionID: session.id, projectDir: session.projectDir)
+        if (prev == .waiting && session.status != .waiting) || (prev == .idle && session.status == .busy) {
+            events.append(.dismiss(reminder))
+        }
+        if prev != .waiting && session.status == .waiting {
+            events.append(.transition(kind: .waiting, reminder: reminder,
+                                      pid: session.clientPID, title: session.sessionTitle))
+        }
+        if prev == .busy && session.status == .idle {
+            events.append(.transition(kind: .idle, reminder: reminder,
+                                      pid: session.clientPID, title: session.sessionTitle))
+        }
+    }
+    return events
+}
+
 /// `5h36m` / `3h` / `12m` — the card's and the menu's one duration form.
 func durationText(minutes: Int) -> String {
     let h = minutes / 60

@@ -260,8 +260,8 @@ class SessionMonitor {
     private var scanTimer: Timer?
     private var pollTimer: Timer?
     private let onStateChange: (AppState) -> Void
-    var onTransition: ((SessionStatus, String, Int32?, String?) -> Void)?
-    var onDismiss: ((String) -> Void)?
+    var onTransition: ((SessionStatus, SessionReminder, Int32?, String?) -> Void)?
+    var onDismiss: ((SessionReminder) -> Void)?
 
     /// Which directories get asked for pending forms/permissions: those of a session whose work
     /// is active or whose last activity is newer than this window, plus any session already
@@ -660,27 +660,31 @@ class SessionMonitor {
     }
 
     private func publish(sessions: [SessionInfo]) {
+        // Read-before-write: both maps are read once here, before any callback runs. That is equivalent
+        // to the per-session lookups it replaced only because no callback reads them or re-enters
+        // `publish`; the state is stored below, after every event has been dispatched.
+        let events = reminderEvents(previousStatus: previousStatus, previousDir: previousDir, sessions: sessions)
+        for event in events {
+            switch event {
+            case .dismiss(let reminder):
+                onDismiss?(reminder)
+            case .transition(let kind, let reminder, let pid, let title):
+                switch kind {
+                case .waiting: sendWaitingNotification(projectDir: reminder.projectDir)
+                case .idle: sendIdleNotification(projectDir: reminder.projectDir)
+                case .busy, .error: break   // unreachable: `reminderEvents` emits only `.waiting`/`.idle`, and it is the only producer
+                }
+                onTransition?(kind, reminder, pid, title)
+            }
+        }
+
         let visibleIDs = Set(sessions.map(\.id))
         for id in Set(previousStatus.keys).subtracting(visibleIDs) {
-            if let dir = previousDir.removeValue(forKey: id) {
-                onDismiss?(dir)
-            }
+            previousDir.removeValue(forKey: id)
             previousStatus.removeValue(forKey: id)
         }
 
         for session in sessions {
-            let prev = previousStatus[session.id] ?? .idle
-            if (prev == .waiting && session.status != .waiting) || (prev == .idle && session.status == .busy) {
-                onDismiss?(session.projectDir)
-            }
-            if prev != .waiting && session.status == .waiting {
-                sendWaitingNotification(projectDir: session.projectDir)
-                onTransition?(.waiting, session.projectDir, session.clientPID, session.sessionTitle)
-            }
-            if prev == .busy && session.status == .idle {
-                sendIdleNotification(projectDir: session.projectDir)
-                onTransition?(.idle, session.projectDir, session.clientPID, session.sessionTitle)
-            }
             previousStatus[session.id] = session.status
             previousDir[session.id] = session.projectDir
         }
