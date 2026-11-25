@@ -854,22 +854,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
             }
         }
 
-        /// The full-scale target, in linear sample units. Just under 1.0 because the Int16 round-trip
-        /// below pushes a sample at exactly full scale one step past it, which clips — 0.94 is
-        /// -0.5 dBFS and leaves that margin.
+        /// The ceiling both loudness stages end at, in linear sample units. Stage one scales the
+        /// waveform until its loudest sample sits here; stage two pushes the average level up but is
+        /// a limiter, so nothing crosses it. Just under 1.0 because the Int16 round-trip below pushes
+        /// a sample at exactly full scale one step past it, which clips — 0.94 is -0.5 dBFS and
+        /// leaves that margin.
         private static let targetPeak: Float = 0.94
 
         /// Rendered alerts, keyed by case. The decode and encode cost a few milliseconds and the
         /// same sound rings again on the next reminder, so each one is paid for once.
         private static var rendered: [AlertSound: Data] = [:]
 
-        /// This case's waveform, amplified to just under full scale and encoded as 16-bit PCM WAV —
+        /// This case's waveform, made louder at an unchanged peak and encoded as 16-bit PCM WAV —
         /// the form `AVAudioPlayer(data:)` opens.
         ///
-        /// Amplifying the file is the point: the bundled alerts leave 5–15 dB of headroom unused
-        /// (`Tink` peaks at -8.8 dBFS, `Frog` -15.3, `Hero` -5.4), and claiming it costs nothing
-        /// outside our own playback. Raising the output device instead would move a level the user
-        /// set for every other app, and a mute has to stay a mute.
+        /// Two stages, both ending at `targetPeak`. First peak normalization: the bundled alerts
+        /// leave 5–15 dB of headroom unused (`Tink` peaks at -8.8 dBFS, `Frog` -15.3, `Hero` -5.4),
+        /// and claiming it costs nothing outside our own playback. That alone leaves the average
+        /// level low, because these sounds are spiky — `Purr` crests 23.1 dB over its RMS — so the
+        /// second stage compresses: channel-linked, -31 dBFS / 6:1, with makeup gain, then a 5 ms
+        /// lookahead limiter. On `Purr` that is about +7.8 dB RMS at the same peak. Raising the
+        /// output device instead would move a level the user set for every other app, and a mute has
+        /// to stay a mute.
         ///
         /// `nil` where there is nothing to amplify: `.off`, and `.system`, whose beep is synthesised
         /// by the OS and has no file. Also `nil` on a failure — no file, an empty read, a peak
@@ -903,7 +909,74 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
             guard peak > 0, peak < targetPeak else { return nil }
 
             let scale = targetPeak / peak
-            let sampleRate = UInt32(buffer.format.sampleRate)
+            let rate = buffer.format.sampleRate
+            let sampleRate = UInt32(rate)
+
+            // Stage two, the loudness stage. Peak normalization above balances the sound's crest
+            // factor against the ceiling but leaves the average level low; this trades the crest
+            // away. Every gain below is computed from the channel-linked detector — the loudest
+            // channel in a frame — so both channels take the same gain and the stereo image holds.
+            let thresholdDb = -31.0
+            let ratio = 6.0
+            let attackCoefficient = exp(-1 / (rate * 0.001))
+            let releaseCoefficient = exp(-1 / (rate * 0.040))
+            let limiterRelease = Float(exp(-1 / (rate * 0.025)))
+            // Makeup is the compressor's own slope up to the ceiling, so a signal sitting at the
+            // threshold lands at the threshold plus what the ratio would have taken off it. Constant,
+            // so it is folded into the per-frame compressor gain once, not applied per sample.
+            let makeupDb = (20 * log10(Double(targetPeak)) - thresholdDb) * (1 - 1 / ratio)
+            let makeupGain = Float(pow(10, makeupDb / 20))
+
+            var loudnessGain = [Float](repeating: 1, count: frames)
+            var envelope = 0.0
+            for frame in 0..<frames {
+                var detector: Float = 0
+                for channel in 0..<channelCount {
+                    detector = max(detector, abs(channels[channel][frame] * scale))
+                }
+                let coefficient = Double(detector) > envelope ? attackCoefficient : releaseCoefficient
+                envelope = coefficient * envelope + (1 - coefficient) * Double(detector)
+                var gainDb = 0.0
+                if envelope > 0 {
+                    gainDb = max(0, (20 * log10(envelope) - thresholdDb) * (1 - 1 / ratio))
+                }
+                loudnessGain[frame] = Float(pow(10, -gainDb / 20)) * makeupGain
+            }
+
+            // How much the limiter will have to take back per frame to stay under the ceiling.
+            var need = [Float](repeating: 1, count: frames)
+            for frame in 0..<frames {
+                var loudest: Float = 0
+                for channel in 0..<channelCount {
+                    loudest = max(loudest, abs(channels[channel][frame] * scale * loudnessGain[frame]))
+                }
+                need[frame] = max(1, loudest / targetPeak)
+            }
+
+            // The gain must already be down when a peak arrives, so each frame asks what the whole
+            // next 5 ms needs: a sliding minimum over that window, clamped at the tail. A monotonic
+            // deque keeps it linear — indices ascending by `need`, stale ones dropped from the front.
+            let window = max(1, Int(rate * 0.005))
+            var required = [Float](repeating: 1, count: frames)
+            var deque = [Int]()
+            deque.reserveCapacity(window + 1)
+            var head = 0
+            var pushed = 0
+            for frame in 0..<frames {
+                let last = min(frame + window - 1, frames - 1)
+                while pushed <= last {
+                    while deque.count > head, need[deque[deque.count - 1]] >= need[pushed] { deque.removeLast() }
+                    deque.append(pushed)
+                    pushed += 1
+                }
+                while deque[head] < frame { head += 1 }
+                required[frame] = need[deque[head]]
+                if head > 4096, head * 2 > deque.count {
+                    deque.removeFirst(head)
+                    head = 0
+                }
+            }
+
             let blockAlign = channelCount * 2
             var data = Data(capacity: 44 + frames * blockAlign)
             func append<T: FixedWidthInteger>(_ value: T) {
@@ -923,10 +996,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, AVAudioPlaye
             append(UInt16(16))
             data.append(contentsOf: Array("data".utf8))
             append(UInt32(frames * blockAlign))
+            var limiterGain: Float = 1
             for frame in 0..<frames {
+                // Instant down, eased up: a peak is caught by the gain already being low, and the
+                // release only decides how quickly the level comes back.
+                let target = 1 / required[frame]
+                if target < limiterGain {
+                    limiterGain = target
+                } else {
+                    limiterGain = limiterRelease * limiterGain + (1 - limiterRelease) * target
+                }
+                let gain = scale * loudnessGain[frame] * limiterGain
                 // Interleaved by hand: the buffer is planar, the file is not.
                 for channel in 0..<channelCount {
-                    let sample = max(-1, min(1, channels[channel][frame] * scale))
+                    let sample = max(-targetPeak, min(targetPeak, channels[channel][frame] * gain))
                     append(Int16((sample * 32767).rounded()))
                 }
             }
